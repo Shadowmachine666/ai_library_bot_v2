@@ -18,3 +18,22 @@ build/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+
+# FAISS индексы и метаданные
+*.pkl
+data/
+data/index.*
+data/*.faiss
+data/*.pkl
+
+# Логи
+logs/
+*.log
+
+# Данные (книги) - исключаем все книги, оставляем только структуру
+data/books/*
+!data/books/.gitkeep
+
+# Временные файлы
+*.tmp
+*.bak

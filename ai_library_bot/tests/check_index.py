@@ -2,8 +2,8 @@ import pickle
 import os
 from pathlib import Path
 
-# Определяем путь к файлу индекса относительно расположения скрипта
-script_dir = Path(__file__).parent
+# Определяем путь к файлу индекса относительно расположения скрипта (теперь мы в tests/)
+script_dir = Path(__file__).parent.parent
 index_path = script_dir / "data" / "index.files.pkl"
 
 if not index_path.exists():
@@ -25,3 +25,4 @@ for k, v in idx.items():
     print(f'     Хеш: {file_hash}...')
     print(f'     Индексирован: {indexed_at}')
     print()
+

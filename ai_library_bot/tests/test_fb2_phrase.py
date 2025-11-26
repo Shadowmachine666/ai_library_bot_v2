@@ -8,8 +8,8 @@ import pickle
 import faiss
 import numpy as np
 
-# Определяем базовую директорию скрипта
-SCRIPT_DIR = Path(__file__).parent.absolute()
+# Определяем базовую директорию проекта (на уровень выше tests/)
+SCRIPT_DIR = Path(__file__).parent.parent.absolute()
 os.chdir(SCRIPT_DIR)
 
 # Добавляем путь к модулям
@@ -32,7 +32,7 @@ async def test_fb2_phrase():
     print(f"{'='*80}\n")
     
     # Находим FB2 файлы
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.parent
     books_dir = script_dir / "data" / "books"
     fb2_files = list(books_dir.glob("*.fb2"))
     
@@ -103,7 +103,7 @@ async def test_fb2_phrase():
     print("Проверка FAISS индекса")
     print(f"{'='*80}\n")
     
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.parent
     index_path = script_dir / Config.FAISS_PATH
     metadata_path = index_path.with_suffix(".metadata.pkl")
     

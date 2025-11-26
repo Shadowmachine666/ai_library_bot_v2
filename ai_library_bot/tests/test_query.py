@@ -5,8 +5,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Добавляем путь к модулям
-sys.path.insert(0, str(Path(__file__).parent))
+# Добавляем путь к модулям (теперь мы в tests/, нужно подняться на уровень выше)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.analyzer import analyze
 from src.retriever_service import retrieve_chunks, NOT_FOUND
@@ -60,6 +60,4 @@ async def test_query(query: str):
 if __name__ == "__main__":
     query = "ЗАЧЕМ ИЗУЧАТЬ ЭТОЛОГИЮ?"
     asyncio.run(test_query(query))
-
-
 

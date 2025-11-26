@@ -2,12 +2,12 @@
 import sys
 from pathlib import Path
 
-# Добавляем путь к модулям
-sys.path.insert(0, str(Path(__file__).parent))
+# Добавляем путь к модулям (теперь мы в tests/, нужно подняться на уровень выше)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pickle
 
-metadata_path = Path("data/index.metadata.pkl")
+metadata_path = Path(__file__).parent.parent / "data" / "index.metadata.pkl"
 
 if not metadata_path.exists():
     print("❌ Метаданные не найдены!")

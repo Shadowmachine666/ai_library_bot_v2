@@ -3,7 +3,8 @@
 
 from pathlib import Path
 
-file_path = Path("data/books/book2.txt")
+# Теперь мы в tests/, нужно подняться на уровень выше
+file_path = Path(__file__).parent.parent / "data" / "books" / "book2.txt"
 
 print(f"Проверка файла: {file_path}")
 print(f"Существует: {file_path.exists()}")
@@ -30,6 +31,4 @@ for encoding in encodings:
     except Exception as e:
         print(f"❌ {encoding}: ошибка - {e}")
         print()
-
-
 

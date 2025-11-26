@@ -2,7 +2,8 @@
 import pickle
 from pathlib import Path
 
-metadata_path = Path("data/index.faiss.metadata.pkl")
+# Теперь мы в tests/, нужно подняться на уровень выше
+metadata_path = Path(__file__).parent.parent / "data" / "index.metadata.pkl"
 
 if not metadata_path.exists():
     print("Метаданные не найдены!")
@@ -38,6 +39,4 @@ for i, meta in enumerate(book2_metadata[:5]):
         print(f"⚠️ ВНИМАНИЕ: Обнаружено {unreadable} нечитаемых символов из {len(preview)}!")
     else:
         print("✅ Текст выглядит нормально")
-
-
 
