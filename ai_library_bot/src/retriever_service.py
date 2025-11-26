@@ -4,6 +4,7 @@
 на основе эмбеддинга запроса пользователя.
 """
 
+import time
 from typing import Any
 
 from src.config import Config
@@ -33,10 +34,12 @@ async def get_retriever() -> Any:
     metadata_path = index_path.with_suffix(".metadata.pkl")
 
     if not index_path.exists():
-        raise FileNotFoundError(
+        error_msg = (
             f"FAISS индекс не найден: {index_path}. "
-            f"Сначала запустите команду ingest для создания индекса."
+            f"Сначала запустите команду 'python -m src.main ingest' для создания индекса."
         )
+        logger.error(f"[RETRIEVER] ❌ {error_msg}")
+        raise FileNotFoundError(error_msg)
 
     logger.info(f"Загрузка FAISS индекса из {index_path}")
     index = faiss.read_index(str(index_path))
@@ -48,9 +51,9 @@ async def get_retriever() -> Any:
             metadata = pickle.load(f)
         logger.info(f"Загружено {len(metadata)} метаданных")
         
-        # Проверяем метаданные из book2.txt на наличие проблем с кодировкой
+        # Проверяем метаданные из book2.txt на наличие проблем с кодировкой (отладочная проверка)
         book2_metadata = [m for m in metadata if m.get("source") == "book2.txt"]
-        logger.info(f"Метаданных из book2.txt: {len(book2_metadata)}")
+        logger.debug(f"Метаданных из book2.txt: {len(book2_metadata)}")
         
         for i, meta in enumerate(book2_metadata[:3]):  # Проверяем первые 3 чанка из book2.txt
             chunk_text = meta.get("chunk_text", "")
@@ -58,14 +61,14 @@ async def get_retriever() -> Any:
             if chunk_text:
                 # Показываем первые 100 символов
                 preview = chunk_text[:100]
-                logger.info(f"[ПРОВЕРКА] Чанк {chunk_idx} из book2.txt, первые 100 символов: {preview}")
+                logger.debug(f"[ПРОВЕРКА] Чанк {chunk_idx} из book2.txt, первые 100 символов: {preview}")
                 
                 # Проверяем на кракозябры
                 unreadable = sum(1 for c in preview if ord(c) > 127 and not c.isprintable() and c not in "\n\r\t" and c not in "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
                 if unreadable > len(preview) * 0.1:
                     logger.warning(f"[ПРОВЕРКА] ⚠️ Чанк {chunk_idx} из book2.txt содержит кракозябры: {unreadable} нечитаемых символов из {len(preview)}")
                 else:
-                    logger.info(f"[ПРОВЕРКА] ✅ Чанк {chunk_idx} из book2.txt выглядит нормально")
+                    logger.debug(f"[ПРОВЕРКА] ✅ Чанк {chunk_idx} из book2.txt выглядит нормально")
     
     logger.info(f"Индекс загружен: {index.ntotal} векторов, размерность {index.d}")
     
@@ -105,8 +108,17 @@ async def _create_query_embedding(query: str) -> list[float]:
         logger.debug(f"[RETRIEVER] Первые 5 значений эмбеддинга: {embedding[:5]}")
         return embedding
     except Exception as e:
-        logger.error(f"[RETRIEVER] ❌ Ошибка при создании эмбеддинга запроса: {type(e).__name__}: {e}")
-        raise ValueError(f"Не удалось создать эмбеддинг: {e}") from e
+        error_type = type(e).__name__
+        query_preview = query[:100] + "..." if len(query) > 100 else query
+        logger.error(
+            f"[RETRIEVER] ❌ Ошибка при создании эмбеддинга запроса: "
+            f"тип={error_type}, сообщение={str(e)}, "
+            f"запрос='{query_preview}', "
+            f"модель={Config.EMBEDDING_MODEL}"
+        )
+        raise ValueError(
+            f"Не удалось создать эмбеддинг для запроса '{query_preview}': {error_type}: {e}"
+        ) from e
 
 
 async def _search_in_faiss(
@@ -313,21 +325,30 @@ async def retrieve_chunks(query: str) -> list[dict[str, Any]] | str:
         logger.warning("[RETRIEVER] Пустой запрос")
         return NOT_FOUND
 
+    retrieval_start_time = time.perf_counter()
     logger.info(f"[RETRIEVER] ===== Начало поиска релевантных чанков =====")
     logger.info(f"[RETRIEVER] Запрос: {query}")
 
     # Инициализация retriever
+    init_start_time = time.perf_counter()
     logger.info(f"[RETRIEVER] Этап 1/3: Инициализация retriever (загрузка FAISS индекса)")
     retriever = await get_retriever()
+    init_time = time.perf_counter() - init_start_time
+    logger.debug(f"[RETRIEVER] Инициализация завершена за {init_time:.3f}с")
 
     # Создание эмбеддинга запроса
+    embedding_start_time = time.perf_counter()
     logger.info(f"[RETRIEVER] Этап 2/3: Создание эмбеддинга запроса через OpenAI API")
     query_embedding = await _create_query_embedding(query)
-    logger.info(f"[RETRIEVER] ✅ Эмбеддинг создан, размерность: {len(query_embedding)}")
+    embedding_time = time.perf_counter() - embedding_start_time
+    logger.debug(f"[RETRIEVER] Создание эмбеддинга завершено за {embedding_time:.3f}с")
 
     # Поиск в FAISS
+    search_start_time = time.perf_counter()
     logger.info(f"[RETRIEVER] Этап 3/3: Поиск в FAISS индексе (top_k={Config.TOP_K})")
     results = await _search_in_faiss(retriever, query_embedding, top_k=Config.TOP_K)
+    search_time = time.perf_counter() - search_start_time
+    logger.debug(f"[RETRIEVER] Поиск в FAISS завершён за {search_time:.3f}с")
 
     # Умная фильтрация (если включена)
     if Config.SMART_FILTERING_ENABLED:

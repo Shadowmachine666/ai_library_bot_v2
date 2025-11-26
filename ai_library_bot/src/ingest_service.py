@@ -870,7 +870,6 @@ async def ingest_books(folder_path: str, force: bool = False) -> None:
 
     # Загружаем индекс файлов
     file_index = _load_file_index()
-    logger.info(f"Загружен индекс файлов: {len(file_index)} файлов")
 
     # Поиск всех поддерживаемых файлов в папке
     files_in_folder: list[Path] = []
