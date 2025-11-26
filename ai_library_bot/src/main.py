@@ -33,6 +33,11 @@ def main() -> None:
         default="./data/books",
         help="Путь к папке с книгами (по умолчанию: ./data/books)",
     )
+    ingest_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Принудительно переиндексировать все файлы, даже если они не изменились",
+    )
 
     # Команда run
     run_parser = subparsers.add_parser("run", help="Запустить Telegram бота")
@@ -50,7 +55,7 @@ def main() -> None:
 
     try:
         if args.command == "ingest":
-            asyncio.run(ingest_books(Path(args.folder)))
+            asyncio.run(ingest_books(str(Path(args.folder)), force=args.force))
         elif args.command == "run":
             asyncio.run(run_bot())
         else:

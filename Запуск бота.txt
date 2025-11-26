@@ -7,6 +7,14 @@ python -m src.main ingest --folder data/books
 Remove-Item data\index.faiss -ErrorAction SilentlyContinue
 Remove-Item data\index.faiss.metadata.pkl -ErrorAction SilentlyContinue
 
+   * Индексация всех книг
 python -m src.main ingest --folder data/books
-python -m src.main ingest
+   *Повторная индексация (файлы не изменились)
+python -m src.main ingest --folder data/books
+   *Принудительная переиндексация (Переиндексирует все файлы, даже если они не изменились):
+python -m src.main ingest --folder data/books --force
+   *Проверка индекса файлов
+cd ai_library_bot
+python check_index.py
+
 python test_encoding.py

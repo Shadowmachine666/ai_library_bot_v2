@@ -4,6 +4,9 @@
 создаёт эмбеддинги и сохраняет в FAISS индекс.
 """
 
+import hashlib
+import pickle
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +17,286 @@ logger = setup_logger(__name__)
 
 # Поддерживаемые форматы файлов
 SUPPORTED_EXTENSIONS = {".txt", ".pdf", ".epub", ".fb2"}
+
+# Тип для индекса файлов
+FileIndex = dict[str, dict[str, Any]]
+
+
+def _get_file_index_path() -> Path:
+    """Возвращает путь к файлу индекса файлов.
+
+    Returns:
+        Путь к файлу index.files.pkl в той же директории, что и FAISS индекс.
+    """
+    return Config.FAISS_PATH.with_suffix(".files.pkl")
+
+
+@run_in_executor
+def _calculate_file_hash(file_path: Path) -> str:
+    """Вычисляет SHA256 хеш файла.
+
+    Используется для определения, изменился ли файл с момента последней индексации.
+
+    Args:
+        file_path: Путь к файлу.
+
+    Returns:
+        SHA256 хеш файла в виде hex-строки.
+    """
+    logger.debug(f"Вычисление хеша файла: {file_path}")
+    sha256_hash = hashlib.sha256()
+    
+    try:
+        with open(file_path, "rb") as f:
+            # Читаем файл блоками для экономии памяти
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        
+        file_hash = sha256_hash.hexdigest()
+        logger.debug(f"Хеш файла {file_path.name}: {file_hash[:16]}...")
+        return file_hash
+    except Exception as e:
+        logger.error(f"Ошибка при вычислении хеша файла {file_path}: {e}")
+        raise ValueError(f"Не удалось вычислить хеш файла: {e}") from e
+
+
+def _load_file_index() -> FileIndex:
+    """Загружает индекс файлов из файла.
+
+    Индекс файлов содержит информацию о всех проиндексированных файлах:
+    - file_hash: SHA256 хеш содержимого файла
+    - file_size: Размер файла в байтах
+    - indexed_at: Timestamp индексации (ISO format)
+    - chunks_count: Количество чанков
+    - first_chunk_index: Индекс первого чанка в FAISS
+    - last_chunk_index: Индекс последнего чанка в FAISS
+    - file_type: Тип файла (.txt, .pdf, .epub, .fb2)
+
+    Returns:
+        Словарь, где ключ - полный путь к файлу (str), значение - словарь с информацией о файле.
+        Если файл индекса не существует, возвращает пустой словарь.
+    """
+    index_path = _get_file_index_path()
+    
+    if not index_path.exists():
+        logger.debug("Индекс файлов не найден, создаём новый")
+        return {}
+    
+    try:
+        with open(index_path, "rb") as f:
+            file_index = pickle.load(f)
+        logger.info(f"Загружен индекс файлов: {len(file_index)} файлов")
+        return file_index
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке индекса файлов: {e}")
+        logger.warning("Создаём новый индекс файлов")
+        return {}
+
+
+def _save_file_index(file_index: FileIndex) -> None:
+    """Сохраняет индекс файлов в файл.
+
+    Args:
+        file_index: Словарь с информацией о проиндексированных файлах.
+    """
+    index_path = _get_file_index_path()
+    
+    try:
+        # Создаём директорию, если её нет
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(index_path, "wb") as f:
+            pickle.dump(file_index, f, protocol=4)
+        
+        logger.info(f"Индекс файлов сохранён: {index_path} ({len(file_index)} файлов)")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении индекса файлов: {e}")
+        raise ValueError(f"Не удалось сохранить индекс файлов: {e}") from e
+
+
+async def _should_index_file(
+    file_path: Path, file_index: FileIndex, force: bool = False
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Проверяет, нужно ли индексировать файл.
+
+    Определяет статус файла:
+    - "new": файл новый, не был проиндексирован
+    - "changed": файл изменился (хеш не совпадает)
+    - "unchanged": файл не изменился (хеш совпадает)
+    - "not_found": файл не существует физически
+
+    Args:
+        file_path: Путь к файлу для проверки.
+        file_index: Индекс файлов (словарь с информацией о проиндексированных файлах).
+        force: Если True, принудительно индексировать даже если файл не изменился.
+
+    Returns:
+        Кортеж (should_index, reason, existing_file_info):
+        - should_index: True если нужно индексировать, False если пропустить
+        - reason: Причина ("new", "changed", "unchanged", "not_found")
+        - existing_file_info: Информация о существующем файле из индекса или None
+    """
+    file_path_str = str(file_path.absolute())
+    
+    # Проверяем, существует ли файл физически
+    if not file_path.exists():
+        logger.warning(f"Файл не существует: {file_path}")
+        return False, "not_found", None
+    
+    # Получаем информацию о файле из индекса
+    existing_file_info = file_index.get(file_path_str)
+    
+    # Если файла нет в индексе - это новый файл
+    if existing_file_info is None:
+        logger.info(f"Новый файл для индексации: {file_path.name}")
+        return True, "new", None
+    
+    # Если принудительная переиндексация - индексируем
+    if force:
+        logger.info(f"Принудительная переиндексация: {file_path.name}")
+        return True, "changed", existing_file_info
+    
+    # Вычисляем текущий хеш файла
+    try:
+        current_hash = await _calculate_file_hash(file_path)
+        stored_hash = existing_file_info.get("file_hash")
+        
+        # Сравниваем хеши
+        if current_hash == stored_hash:
+            # Файл не изменился
+            logger.debug(f"Файл не изменился, пропускаем: {file_path.name}")
+            return False, "unchanged", existing_file_info
+        else:
+            # Файл изменился
+            logger.info(
+                f"Файл изменился, требуется переиндексация: {file_path.name} "
+                f"(старый хеш: {stored_hash[:16]}..., новый: {current_hash[:16]}...)"
+            )
+            return True, "changed", existing_file_info
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке файла {file_path}: {e}")
+        # В случае ошибки лучше попробовать переиндексировать
+        return True, "changed", existing_file_info
+
+
+async def _remove_file_from_index(file_path: Path, file_index: FileIndex) -> None:
+    """Удаляет все чанки файла из FAISS индекса.
+
+    Поскольку FAISS не поддерживает удаление отдельных векторов,
+    пересоздаёт индекс без чанков удаляемого файла.
+
+    Args:
+        file_path: Путь к файлу, чанки которого нужно удалить.
+        file_index: Индекс файлов (будет обновлён после удаления).
+    """
+    import faiss
+    import numpy as np
+
+    file_path_str = str(file_path.absolute())
+    
+    # Проверяем, есть ли файл в индексе
+    file_info = file_index.get(file_path_str)
+    if file_info is None:
+        logger.debug(f"Файл {file_path.name} не найден в индексе, нечего удалять")
+        return
+    
+    logger.info(f"Удаление файла из индекса: {file_path.name}")
+    
+    index_path = Config.FAISS_PATH
+    metadata_path = index_path.with_suffix(".metadata.pkl")
+    
+    # Проверяем существование индекса
+    if not index_path.exists() or not metadata_path.exists():
+        logger.warning("Индекс не найден, нечего удалять")
+        # Удаляем запись из индекса файлов
+        file_index.pop(file_path_str, None)
+        return
+    
+    # Загружаем текущий индекс и метаданные
+    try:
+        old_index = faiss.read_index(str(index_path))
+        with open(metadata_path, "rb") as f:
+            all_metadata = pickle.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке индекса для удаления: {e}")
+        raise ValueError(f"Не удалось загрузить индекс для удаления: {e}") from e
+    
+    logger.info(f"Загружен индекс: {old_index.ntotal} векторов, {len(all_metadata)} метаданных")
+    
+    # Находим индексы чанков, которые нужно удалить
+    chunks_to_remove = set()
+    for idx, meta in enumerate(all_metadata):
+        meta_file_path = meta.get("file_path", "")
+        # Сравниваем абсолютные пути
+        if str(Path(meta_file_path).absolute()) == file_path_str:
+            chunks_to_remove.add(idx)
+    
+    if not chunks_to_remove:
+        logger.warning(f"Чанки файла {file_path.name} не найдены в метаданных")
+        # Удаляем запись из индекса файлов
+        file_index.pop(file_path_str, None)
+        return
+    
+    logger.info(f"Найдено {len(chunks_to_remove)} чанков для удаления из файла {file_path.name}")
+    
+    # Фильтруем метаданные и векторы (оставляем только те, что не нужно удалять)
+    new_metadata = []
+    vectors_to_keep = []
+    
+    for idx, meta in enumerate(all_metadata):
+        if idx not in chunks_to_remove:
+            new_metadata.append(meta)
+            # Получаем вектор из старого индекса
+            vector = old_index.reconstruct(idx)
+            vectors_to_keep.append(vector)
+    
+    # Если не осталось векторов - создаём пустой индекс
+    if not vectors_to_keep:
+        logger.info("Все векторы удалены, создаём пустой индекс")
+        embedding_dim = old_index.d
+        new_index = faiss.IndexFlatL2(embedding_dim)
+        new_metadata = []
+    else:
+        # Создаём новый индекс с оставшимися векторами
+        embedding_dim = len(vectors_to_keep[0])
+        new_index = faiss.IndexFlatL2(embedding_dim)
+        vectors_array = np.array(vectors_to_keep, dtype=np.float32)
+        new_index.add(vectors_array)
+        logger.info(f"Создан новый индекс: {new_index.ntotal} векторов (было {old_index.ntotal})")
+    
+    # Обновляем индексы чанков в метаданных (они сдвинулись)
+    # Группируем метаданные по файлам для обновления first/last_chunk_index
+    files_chunks: dict[str, list[int]] = {}
+    for new_idx, meta in enumerate(new_metadata):
+        meta_file_path = str(Path(meta.get("file_path", "")).absolute())
+        if meta_file_path not in files_chunks:
+            files_chunks[meta_file_path] = []
+        files_chunks[meta_file_path].append(new_idx)
+        # Обновляем chunk_index в метаданных
+        meta["chunk_index"] = new_idx
+    
+    # Обновляем first_chunk_index и last_chunk_index в индексе файлов
+    for meta_file_path, chunk_indices in files_chunks.items():
+        if chunk_indices:
+            file_info = file_index.get(meta_file_path)
+            if file_info:
+                file_info["first_chunk_index"] = min(chunk_indices)
+                file_info["last_chunk_index"] = max(chunk_indices)
+                file_info["chunks_count"] = len(chunk_indices)
+    
+    # Удаляем запись о файле из индекса файлов
+    file_index.pop(file_path_str, None)
+    
+    # Сохраняем новый индекс и метаданные
+    faiss.write_index(new_index, str(index_path))
+    with open(metadata_path, "wb") as f:
+        pickle.dump(new_metadata, f, protocol=4)
+    
+    logger.info(
+        f"Файл {file_path.name} удалён из индекса: "
+        f"удалено {len(chunks_to_remove)} чанков, осталось {new_index.ntotal} векторов"
+    )
 
 
 @run_in_executor
@@ -331,14 +614,24 @@ async def _create_embeddings_batch(texts: list[str]) -> list[list[float]]:
 
 
 async def _save_to_faiss(
-    embeddings: list[list[float]], chunks: list[str], metadata: list[dict[str, Any]]
+    embeddings: list[list[float]],
+    chunks: list[str],
+    metadata: list[dict[str, Any]],
+    file_path: Path,
+    file_hash: str,
+    file_index: FileIndex | None = None,
 ) -> None:
     """Сохраняет эмбеддинги и метаданные в FAISS индекс.
+
+    Также обновляет индекс файлов с информацией о проиндексированном файле.
 
     Args:
         embeddings: Список эмбеддингов.
         chunks: Список текстовых чанков.
         metadata: Список метаданных для каждого чанка.
+        file_path: Путь к проиндексированному файлу.
+        file_hash: SHA256 хеш файла.
+        file_index: Индекс файлов для обновления. Если None, загружается автоматически.
     """
     import faiss
     import numpy as np
@@ -375,9 +668,16 @@ async def _save_to_faiss(
         all_metadata = []
         logger.info(f"Создан новый FAISS индекс с размерностью {embedding_dim}")
 
+    # Запоминаем индекс первого чанка (до добавления)
+    first_chunk_index = len(all_metadata)
+
     # Добавляем новые эмбеддинги
     index.add(embeddings_array)
     all_metadata.extend(metadata)
+
+    # Вычисляем индекс последнего чанка (после добавления)
+    last_chunk_index = len(all_metadata) - 1
+    chunks_count = len(embeddings)
 
     # Сохраняем индекс и метаданные
     faiss.write_index(index, str(index_path))
@@ -387,12 +687,42 @@ async def _save_to_faiss(
 
     logger.info(f"Индекс сохранён: {index_path} ({index.ntotal} векторов, {len(all_metadata)} метаданных)")
 
+    # Обновляем индекс файлов
+    if file_index is None:
+        file_index = _load_file_index()
+    
+    file_path_str = str(file_path.absolute())
+    file_size = file_path.stat().st_size
+    file_type = file_path.suffix.lower()
+    
+    # Сохраняем информацию о файле в индекс файлов
+    file_index[file_path_str] = {
+        "file_hash": file_hash,
+        "file_size": file_size,
+        "indexed_at": datetime.now().isoformat(),
+        "chunks_count": chunks_count,
+        "first_chunk_index": first_chunk_index,
+        "last_chunk_index": last_chunk_index,
+        "file_type": file_type,
+    }
+    
+    # Сохраняем обновлённый индекс файлов
+    _save_file_index(file_index)
+    
+    logger.info(
+        f"Файл {file_path.name} добавлен в индекс файлов: "
+        f"{chunks_count} чанков (индексы {first_chunk_index}-{last_chunk_index})"
+    )
 
-async def _process_file(file_path: Path) -> None:
+
+async def _process_file(
+    file_path: Path, file_index: FileIndex | None = None
+) -> None:
     """Обрабатывает один файл: читает, разбивает на чанки, создаёт эмбеддинги, сохраняет.
 
     Args:
         file_path: Путь к файлу для обработки.
+        file_index: Индекс файлов для обновления. Если None, загружается автоматически.
 
     Raises:
         ValueError: Если файл слишком большой или имеет неподдерживаемый формат.
@@ -410,6 +740,9 @@ async def _process_file(file_path: Path) -> None:
     # Проверка формата
     if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Неподдерживаемый формат файла: {file_path.suffix}")
+
+    # Вычисляем хеш файла для сохранения в индекс файлов
+    file_hash = await _calculate_file_hash(file_path)
 
     # Чтение файла в зависимости от формата
     extension = file_path.suffix.lower()
@@ -481,24 +814,30 @@ async def _process_file(file_path: Path) -> None:
         if unreadable_count > 10:  # Если больше 10 нечитаемых символов
             logger.warning(f"Чанк {idx} может содержать проблемы с кодировкой: {preview[:50]}...")
 
-    # Сохранение в FAISS
-    await _save_to_faiss(all_embeddings, chunks, chunks_metadata)
+    # Загружаем индекс файлов, если не передан
+    if file_index is None:
+        file_index = _load_file_index()
+
+    # Сохранение в FAISS с обновлением индекса файлов
+    await _save_to_faiss(
+        all_embeddings, chunks, chunks_metadata, file_path, file_hash, file_index
+    )
 
     logger.info(f"Файл {file_path} успешно обработан: {len(chunks)} чанков")
 
 
-async def ingest_books(folder_path: str) -> None:
+async def ingest_books(folder_path: str, force: bool = False) -> None:
     """Основная функция индексации книг из папки.
 
     Обрабатывает все поддерживаемые файлы в указанной папке:
-    - Проверяет размер и формат файлов
-    - Читает содержимое
-    - Разбивает на чанки
-    - Создаёт эмбеддинги
-    - Сохраняет в FAISS индекс
+    - Проверяет, какие файлы нужно индексировать (новые/изменённые)
+    - Удаляет старые чанки изменённых файлов
+    - Индексирует только новые/изменённые файлы
+    - Удаляет из индекса файлы, которые были удалены из папки
 
     Args:
         folder_path: Путь к папке с книгами.
+        force: Если True, принудительно переиндексировать все файлы, даже если они не изменились.
 
     Raises:
         FileNotFoundError: Если папка не существует.
@@ -513,32 +852,101 @@ async def ingest_books(folder_path: str) -> None:
         raise ValueError(f"Указанный путь не является папкой: {folder_path}")
 
     logger.info(f"Начало индексации книг из папки: {folder_path}")
+    if force:
+        logger.info("Режим принудительной переиндексации: все файлы будут переиндексированы")
 
-    # Поиск всех поддерживаемых файлов
-    files_to_process: list[Path] = []
+    # Загружаем индекс файлов
+    file_index = _load_file_index()
+    logger.info(f"Загружен индекс файлов: {len(file_index)} файлов")
+
+    # Поиск всех поддерживаемых файлов в папке
+    files_in_folder: list[Path] = []
     for ext in SUPPORTED_EXTENSIONS:
-        files_to_process.extend(folder.glob(f"*{ext}"))
-        files_to_process.extend(folder.glob(f"*{ext.upper()}"))
+        files_in_folder.extend(folder.glob(f"*{ext}"))
+        files_in_folder.extend(folder.glob(f"*{ext.upper()}"))
     
     # Убираем дубликаты (если файл найден и с .txt и с .TXT)
-    files_to_process = list(dict.fromkeys(files_to_process))  # Сохраняет порядок
+    files_in_folder = list(dict.fromkeys(files_in_folder))  # Сохраняет порядок
 
-    if not files_to_process:
-        logger.warning(f"В папке {folder_path} не найдено поддерживаемых файлов")
+    if not files_in_folder and not file_index:
+        logger.warning(f"В папке {folder_path} не найдено поддерживаемых файлов и индекс пуст")
         return
 
-    logger.info(f"Найдено {len(files_to_process)} файлов для обработки")
+    logger.info(f"Найдено {len(files_in_folder)} файлов в папке")
 
-    # Обработка каждого файла
+    # Проверяем каждый файл и определяем, что нужно сделать
+    files_to_index: list[Path] = []  # Файлы для индексации
+    files_to_remove: list[Path] = []  # Файлы, которые изменились (нужно удалить старые чанки)
+    files_skipped = 0  # Файлы, которые не изменились
+
+    for file_path in files_in_folder:
+        should_index, reason, existing_info = await _should_index_file(file_path, file_index, force)
+        
+        if should_index:
+            if reason == "changed" and existing_info:
+                # Файл изменился - нужно удалить старые чанки перед индексацией
+                files_to_remove.append(file_path)
+            files_to_index.append(file_path)
+            logger.info(f"Файл {file_path.name}: {reason} → будет проиндексирован")
+        else:
+            files_skipped += 1
+            logger.debug(f"Файл {file_path.name}: {reason} → пропущен")
+
+    # Проверяем удалённые файлы (есть в индексе, но нет в папке)
+    folder_abs = folder.absolute()
+    files_in_folder_abs = {str(f.absolute()) for f in files_in_folder}
+    files_to_delete_from_index: list[str] = []
+    
+    for indexed_file_path_str in file_index.keys():
+        indexed_file_path = Path(indexed_file_path_str)
+        # Проверяем, находится ли файл в той же папке
+        try:
+            if indexed_file_path.parent.absolute() == folder_abs:
+                if indexed_file_path_str not in files_in_folder_abs:
+                    # Файл был в индексе, но его нет в папке
+                    files_to_delete_from_index.append(indexed_file_path_str)
+        except Exception:
+            # Если путь невалидный, пропускаем
+            continue
+
+    # Удаляем файлы из индекса
+    for file_path_str in files_to_delete_from_index:
+        file_path = Path(file_path_str)
+        logger.info(f"Файл {file_path.name} удалён из папки, удаляем из индекса")
+        try:
+            await _remove_file_from_index(file_path, file_index)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении файла {file_path.name} из индекса: {e}")
+
+    # Удаляем старые чанки изменённых файлов
+    for file_path in files_to_remove:
+        logger.info(f"Удаление старых чанков изменённого файла: {file_path.name}")
+        try:
+            await _remove_file_from_index(file_path, file_index)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении старых чанков файла {file_path.name}: {e}")
+
+    # Индексируем новые/изменённые файлы
     processed = 0
     errors = 0
 
-    for file_path in files_to_process:
-        try:
-            await _process_file(file_path)
-            processed += 1
-        except Exception as e:
-            errors += 1
-            logger.error(f"Ошибка при обработке файла {file_path}: {e}")
+    if files_to_index:
+        logger.info(f"Начинаем индексацию {len(files_to_index)} файлов")
+        for file_path in files_to_index:
+            try:
+                await _process_file(file_path, file_index)
+                processed += 1
+            except Exception as e:
+                errors += 1
+                logger.error(f"Ошибка при обработке файла {file_path}: {e}", exc_info=True)
+    else:
+        logger.info("Нет файлов для индексации")
 
-    logger.info(f"Индексация завершена: обработано {processed} файлов, " f"ошибок {errors}")
+    # Итоговая статистика
+    logger.info(
+        f"Индексация завершена: "
+        f"обработано {processed} файлов, "
+        f"пропущено {files_skipped} файлов, "
+        f"удалено из индекса {len(files_to_delete_from_index)} файлов, "
+        f"ошибок {errors}"
+    )
