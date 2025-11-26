@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        working-directory: ./ai_library_bot
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run ruff
+        working-directory: ./ai_library_bot
+        run: |
+          ruff check .
+
+      - name: Run black (check)
+        working-directory: ./ai_library_bot
+        run: |
+          black . --check
+
+      - name: Run mypy
+        working-directory: ./ai_library_bot
+        run: |
+          mypy src/ || true
+        continue-on-error: true
+
+      - name: Run pytest
+        working-directory: ./ai_library_bot
+        run: |
+          pytest tests/ -v --tb=short
+
+
+
+

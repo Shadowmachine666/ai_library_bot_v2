@@ -1,0 +1,11 @@
+cd ai_library_bot
+python -m src.main run 
+
+python -m src.main ingest --folder data/books
+
+Remove-Item data\index.faiss -ErrorAction SilentlyContinue
+Remove-Item data\index.faiss.metadata.pkl -ErrorAction SilentlyContinue
+
+python -m src.main ingest --folder data/books
+python -m src.main ingest
+python test_encoding.py

@@ -1,0 +1,72 @@
+"""Точка входа для ai_library_bot.
+
+Поддерживает команды:
+- ingest: загрузка книг в индекс
+- run: запуск Telegram бота
+"""
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+from src.config import Config
+from src.ingest_service import ingest_books
+from src.telegram_bot import run_bot
+from src.utils import setup_logger
+
+logger = setup_logger(__name__)
+
+
+def main() -> None:
+    """Главная функция для запуска приложения."""
+    parser = argparse.ArgumentParser(
+        description="AI Library Bot - RAG-based Telegram bot for answering questions from uploaded books"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Доступные команды")
+
+    # Команда ingest
+    ingest_parser = subparsers.add_parser("ingest", help="Загрузить книги в индекс")
+    ingest_parser.add_argument(
+        "--folder",
+        type=str,
+        default="./data/books",
+        help="Путь к папке с книгами (по умолчанию: ./data/books)",
+    )
+
+    # Команда run
+    run_parser = subparsers.add_parser("run", help="Запустить Telegram бота")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    # Валидация конфигурации
+    if not Config.validate():
+        logger.error("Ошибка конфигурации. Проверьте переменные окружения.")
+        sys.exit(1)
+
+    try:
+        if args.command == "ingest":
+            asyncio.run(ingest_books(Path(args.folder)))
+        elif args.command == "run":
+            asyncio.run(run_bot())
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал прерывания. Завершение работы...")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
