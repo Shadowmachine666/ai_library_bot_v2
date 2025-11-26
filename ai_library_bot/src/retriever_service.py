@@ -241,6 +241,50 @@ def _filter_by_score(results: list[tuple[Any, float]], threshold: float) -> list
     return filtered
 
 
+def _apply_smart_filtering(results: list[tuple[Any, float]]) -> list[tuple[Any, float]]:
+    """Применяет умную фильтрацию для оптимизации количества чанков.
+
+    Если топ-N чанков имеют высокий score (> порога), использует только их.
+    Иначе использует все результаты.
+
+    Args:
+        results: Список кортежей (chunk_data, score), отсортированный по убыванию score.
+
+    Returns:
+        Отфильтрованный список результатов.
+    """
+    if not Config.SMART_FILTERING_ENABLED:
+        return results
+    
+    if len(results) == 0:
+        return results
+    
+    # Проверяем топ-N чанков
+    top_n = min(Config.SMART_FILTERING_TOP_N, len(results))
+    top_chunks = results[:top_n]
+    
+    # Проверяем, все ли топ-N чанков имеют score выше порога
+    all_high_score = all(
+        score >= Config.SMART_FILTERING_SCORE_THRESHOLD 
+        for _, score in top_chunks
+    )
+    
+    if all_high_score:
+        # Используем только топ-N чанков
+        logger.info(
+            f"[RETRIEVER] 🎯 Умная фильтрация: топ-{top_n} чанков имеют score >= {Config.SMART_FILTERING_SCORE_THRESHOLD}, "
+            f"используем только их (экономия: {len(results) - top_n} чанков)"
+        )
+        return top_chunks
+    else:
+        # Используем все результаты
+        logger.info(
+            f"[RETRIEVER] 📊 Умная фильтрация: не все топ-{top_n} чанков имеют высокий score, "
+            f"используем все {len(results)} результатов"
+        )
+        return results
+
+
 async def retrieve_chunks(query: str) -> list[dict[str, Any]] | str:
     """Ищет релевантные чанки для запроса пользователя.
 
@@ -284,6 +328,11 @@ async def retrieve_chunks(query: str) -> list[dict[str, Any]] | str:
     # Поиск в FAISS
     logger.info(f"[RETRIEVER] Этап 3/3: Поиск в FAISS индексе (top_k={Config.TOP_K})")
     results = await _search_in_faiss(retriever, query_embedding, top_k=Config.TOP_K)
+
+    # Умная фильтрация (если включена)
+    if Config.SMART_FILTERING_ENABLED:
+        results = _apply_smart_filtering(results)
+        logger.info(f"[RETRIEVER] После умной фильтрации: {len(results)} результатов")
 
     # Фильтрация по порогу релевантности
     logger.info(f"[RETRIEVER] Найдено {len(results)} результатов до фильтрации")
