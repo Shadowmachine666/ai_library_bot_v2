@@ -32,3 +32,4 @@ for encoding in encodings:
         print(f"❌ {encoding}: ошибка - {e}")
         print()
 
+

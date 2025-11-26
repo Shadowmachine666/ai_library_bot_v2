@@ -1,5 +1,8 @@
 INFO/
 .env
+.env.*
+!.env.example
+!**/.env.example
 .venv/
 .vscode/
 *.faiss
@@ -37,3 +40,20 @@ data/books/*
 # Временные файлы
 *.tmp
 *.bak
+*.backup
+
+# Базы данных и дампы
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql
+
+# Локальные конфигурационные файлы
+*_local.py
+*_dev.py
+*_secret.py
+*_private.py
+
+# Pre-commit hooks (локальные настройки)
+.pre-commit-config.local.yaml

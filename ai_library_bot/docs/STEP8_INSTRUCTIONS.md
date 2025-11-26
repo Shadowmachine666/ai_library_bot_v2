@@ -69,3 +69,4 @@ $pythonPath = "G:\Mój dysk\Programming\Librarian\.venv\Scripts\python.exe"
 
 
 
+

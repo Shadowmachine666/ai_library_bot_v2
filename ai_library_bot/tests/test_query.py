@@ -61,3 +61,4 @@ if __name__ == "__main__":
     query = "ЗАЧЕМ ИЗУЧАТЬ ЭТОЛОГИЮ?"
     asyncio.run(test_query(query))
 
+

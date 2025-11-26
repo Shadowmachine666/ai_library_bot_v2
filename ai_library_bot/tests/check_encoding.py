@@ -40,3 +40,4 @@ for i, meta in enumerate(book2_metadata[:5]):
     else:
         print("✅ Текст выглядит нормально")
 
+

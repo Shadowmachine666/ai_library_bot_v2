@@ -1,0 +1,98 @@
+# Pre-commit hooks для автоматической проверки безопасности и качества кода
+# Установка: pip install pre-commit
+# Активация: pre-commit install
+# Ручной запуск: pre-commit run --all-files
+
+repos:
+  # Проверка на секреты и токены
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: |
+          (?x)^(
+            .*\.example$|
+            .*\.template$|
+            .*\.md$|
+            .*\.txt$|
+            .*\.yml$|
+            .*\.yaml$|
+            .*\.json$|
+            .*\.lock$|
+            .*\.pkl$|
+            .*\.faiss$|
+            .git/.*|
+            .venv/.*|
+            __pycache__/.*|
+            tests/.*|
+            .*\.pyc$
+          )$
+
+  # Проверка размера файлов (предотвращение коммита больших файлов)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=1000']  # Максимальный размер файла 1MB
+      
+      # Проверка на наличие .env файлов
+      - id: check-json
+      - id: check-yaml
+      - id: check-toml
+      
+      # Проверка на наличие merge конфликтов
+      - id: check-merge-conflict
+      
+      # Проверка на наличие отладочных операторов
+      - id: debug-statements
+      
+      # Проверка на trailing whitespace
+      - id: trailing-whitespace
+        exclude: |
+          (?x)^(
+            .*\.md$|
+            .*\.txt$|
+            .*\.pkl$|
+            .*\.faiss$
+          )$
+      
+      # Проверка на наличие больших файлов в Git
+      - id: check-case-conflict
+      
+      # Проверка на наличие файлов с неправильными окончаниями строк
+      - id: end-of-file-fixer
+        exclude: |
+          (?x)^(
+            .*\.pkl$|
+            .*\.faiss$|
+            .*\.db$|
+            .*\.sqlite$
+          )$
+
+  # Проверка .gitignore на наличие чувствительных файлов
+  - repo: local
+    hooks:
+      - id: check-env-files
+        name: Проверка на наличие .env файлов
+        entry: bash -c 'if git diff --cached --name-only | grep -E "\.env$|\.env\." | grep -v "\.env\.example"; then echo "❌ ОШИБКА: Обнаружен .env файл в коммите! Используйте .env.example как шаблон."; exit 1; fi'
+        language: system
+        pass_filenames: false
+        stages: [commit]
+
+      - id: check-sensitive-extensions
+        name: Проверка на чувствительные расширения файлов
+        entry: bash -c 'if git diff --cached --name-only | grep -E "\.(pkl|faiss|log|db|sqlite|dump|backup)$"; then echo "⚠️  ПРЕДУПРЕЖДЕНИЕ: Обнаружены файлы с чувствительными расширениями. Убедитесь, что они в .gitignore."; fi'
+        language: system
+        pass_filenames: false
+        stages: [commit]
+
+  # Python линтеры (опционально, можно раскомментировать)
+  # - repo: https://github.com/astral-sh/ruff-pre-commit
+  #   rev: v0.1.6
+  #   hooks:
+  #     - id: ruff
+  #       args: [--fix, --exit-non-zero-on-fix]
+  #     - id: ruff-format
+
+
