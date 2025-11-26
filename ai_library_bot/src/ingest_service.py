@@ -396,11 +396,21 @@ def _read_pdf_file(file_path: Path) -> str:
         with open(file_path, "rb") as file:
             reader = PyPDF2.PdfReader(file)
             
+            num_pages = len(reader.pages)
+            
             # Проверка количества страниц
-            if len(reader.pages) > Config.MAX_PDF_PAGES:
+            if num_pages > Config.MAX_PDF_PAGES:
                 raise ValueError(
-                    f"PDF содержит {len(reader.pages)} страниц, "
+                    f"PDF содержит {num_pages} страниц, "
                     f"максимум разрешено {Config.MAX_PDF_PAGES}"
+                )
+            
+            # Предупреждение для больших PDF (больше 500 страниц)
+            if num_pages > 500:
+                file_name = Path(file_path).name
+                logger.warning(
+                    f"⚠️ PDF файл {file_name} содержит {num_pages} страниц "
+                    f"(больше рекомендуемых 500). Индексация может занять больше времени."
                 )
             
             # Извлекаем текст со всех страниц
@@ -415,7 +425,10 @@ def _read_pdf_file(file_path: Path) -> str:
                     continue
             
             content = "\n\n".join(text_parts)
-            logger.debug(f"Извлечено {len(content)} символов из {len(reader.pages)} страниц")
+            file_name = Path(file_path).name
+            logger.info(
+                f"Извлечено {len(content)} символов из {num_pages} страниц PDF файла {file_name}"
+            )
             return content
             
     except Exception as e:

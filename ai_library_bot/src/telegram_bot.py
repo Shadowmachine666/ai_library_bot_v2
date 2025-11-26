@@ -162,7 +162,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # 6. Отправка ответа
         logger.info(f"[TELEGRAM_BOT] Этап 6/6: Отправка ответа пользователю")
-        await processing_message.edit_text(response_text, parse_mode="Markdown")
+        try:
+            await processing_message.edit_text(response_text, parse_mode="Markdown")
+        except Exception as e:
+            # Если ошибка парсинга Markdown, отправляем без форматирования
+            logger.warning(f"Ошибка при отправке с Markdown, отправляем без форматирования: {e}")
+            # Убираем Markdown разметку для fallback
+            fallback_text = response_text.replace("**", "").replace("_", "").replace("`", "")
+            await processing_message.edit_text(fallback_text)
 
         logger.info(f"[TELEGRAM_BOT] ✅ Ответ успешно отправлен пользователю {user.id}")
 

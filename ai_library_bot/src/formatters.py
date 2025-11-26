@@ -4,10 +4,35 @@
 для отправки пользователю через Telegram.
 """
 
+import re
+
 from src.analyzer import AnalysisResponse, Result
 from src.utils import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def escape_markdown(text: str) -> str:
+    """Экранирует специальные символы Markdown в тексте.
+    
+    Экранирует символы, которые имеют специальное значение в Telegram MarkdownV1:
+    _ * ` [ ] ( ) - для форматирования и ссылок
+    
+    Args:
+        text: Текст для экранирования.
+    
+    Returns:
+        Текст с экранированными специальными символами.
+    """
+    # Символы, которые нужно экранировать в Telegram MarkdownV1
+    # _ * ` [ ] ( ) - основные символы форматирования
+    special_chars = r'_*`[]()'
+    
+    # Экранируем каждый специальный символ
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    
+    return text
 
 
 def format_response(response: AnalysisResponse) -> str:
@@ -60,9 +85,10 @@ def format_clarification_needed(question: str | None) -> str:
         Markdown текст сообщения.
     """
     if question:
+        escaped_question = escape_markdown(question)
         return f"""❓ **Требуется уточнение**
 
-{question}
+{escaped_question}
 
 Пожалуйста, уточните ваш вопрос, чтобы я мог найти
 нужную информацию в загруженных книгах."""
@@ -102,19 +128,24 @@ def format_success(result: Result) -> str:
     """
     lines = ["✅ **Ответ:**\n"]
 
-    # Добавляем основной ответ
-    lines.append(f"{result.answer}\n")
+    # Добавляем основной ответ (экранируем специальные символы)
+    escaped_answer = escape_markdown(result.answer)
+    lines.append(f"{escaped_answer}\n")
 
     # Добавляем цитаты, если есть
     if result.quotes:
         lines.append("\n📚 **Источники:**\n")
         for i, quote in enumerate(result.quotes, 1):
-            lines.append(f"{i}. _{quote.text}_")
-            lines.append(f"   📖 {quote.source}\n")
+            # Экранируем текст цитаты и источник
+            escaped_text = escape_markdown(quote.text)
+            escaped_source = escape_markdown(quote.source)
+            lines.append(f"{i}\\. _{escaped_text}_")
+            lines.append(f"   📖 {escaped_source}\n")
 
     # Добавляем дисклеймер
     if result.disclaimer:
-        lines.append(f"\n_{result.disclaimer}_")
+        escaped_disclaimer = escape_markdown(result.disclaimer)
+        lines.append(f"\n_{escaped_disclaimer}_")
 
     return "\n".join(lines)
 
