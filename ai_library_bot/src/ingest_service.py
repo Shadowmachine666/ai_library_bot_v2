@@ -181,44 +181,51 @@ def _read_epub_file(file_path: Path) -> str:
 def _read_fb2_file(file_path: Path) -> str:
     """Читает FB2 файл.
 
+    Использует BeautifulSoup для парсинга XML структуры FB2,
+    аналогично обработке EPUB файлов.
+
     Args:
         file_path: Путь к FB2 файлу.
 
     Returns:
         Извлечённый текст из FB2.
     """
-    import xml.etree.ElementTree as ET
+    from bs4 import BeautifulSoup
 
     logger.debug(f"Чтение FB2 файла {file_path}")
 
     try:
-        # FB2 - это XML формат
-        tree = ET.parse(file_path)
-        root = tree.getroot()
+        # FB2 - это XML формат, читаем как XML
+        with open(file_path, "rb") as f:
+            raw_content = f.read()
         
-        # Определяем namespace
-        ns = {"fb": "http://www.gribuser.ru/xml/fictionbook/2.0"}
+        # Парсим XML с помощью BeautifulSoup (как для EPUB)
+        soup = BeautifulSoup(raw_content, "xml")
         
         # Извлекаем текст из всех элементов body
         text_parts = []
-        for body in root.findall(".//fb:body", ns):
-            for section in body.findall(".//fb:section", ns):
-                section_text = []
-                for para in section.findall(".//fb:p", ns):
-                    if para.text:
-                        section_text.append(para.text)
-                    # Также извлекаем текст из вложенных элементов
-                    for elem in para.iter():
-                        if elem.text and elem.tag != para.tag:
-                            section_text.append(elem.text)
-                        if elem.tail:
-                            section_text.append(elem.tail)
-                
-                if section_text:
-                    text_parts.append("\n".join(section_text))
+        bodies = soup.find_all("body")
+        
+        for body in bodies:
+            sections = body.find_all("section", recursive=True)
+            if not sections:
+                # Если нет секций, извлекаем текст напрямую из body
+                body_text = body.get_text(separator="\n", strip=True)
+                if body_text:
+                    text_parts.append(body_text)
+            else:
+                for section in sections:
+                    # Извлекаем весь текст из секции, включая вложенные элементы
+                    section_text = section.get_text(separator="\n", strip=True)
+                    if section_text:
+                        text_parts.append(section_text)
         
         content = "\n\n".join(text_parts)
         logger.debug(f"Извлечено {len(content)} символов из FB2")
+        
+        if not content.strip():
+            logger.warning(f"FB2 файл {file_path.name} не содержит текста")
+        
         return content
         
     except Exception as e:

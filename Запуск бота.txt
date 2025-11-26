@@ -3,6 +3,7 @@ python -m src.main run
 
 python -m src.main ingest --folder data/books
 
+*Удалить старый индекс 
 Remove-Item data\index.faiss -ErrorAction SilentlyContinue
 Remove-Item data\index.faiss.metadata.pkl -ErrorAction SilentlyContinue
 
