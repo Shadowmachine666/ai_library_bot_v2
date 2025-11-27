@@ -18,6 +18,24 @@ class Config:
 
     # Telegram Bot
     TG_TOKEN: str | None = os.getenv("TG_TOKEN")
+    ADMIN_TELEGRAM_ID: int | None = (
+        int(os.getenv("ADMIN_TELEGRAM_ID"))
+        if os.getenv("ADMIN_TELEGRAM_ID") and os.getenv("ADMIN_TELEGRAM_ID").isdigit()
+        else None
+    )
+    CONFIRMATION_TIMEOUT_HOURS: int = int(os.getenv("CONFIRMATION_TIMEOUT_HOURS", "24"))
+
+    # Категории книг (фиксированный список)
+    CATEGORIES: list[str] = [
+        "бизнес",
+        "маркетинг",
+        "психология",
+        "социология",
+        "политология",
+        "инвестирование",
+        "менеджмент",
+        "экономика",
+    ]
 
     # OpenAI
     OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
@@ -73,6 +91,11 @@ class Config:
         if not cls.OPENAI_API_KEY:
             print("ПРЕДУПРЕЖДЕНИЕ: OPENAI_API_KEY не установлен в переменных окружения")
             return False
+        if not cls.ADMIN_TELEGRAM_ID:
+            print(
+                "ПРЕДУПРЕЖДЕНИЕ: ADMIN_TELEGRAM_ID не установлен в переменных окружения. "
+                "Функции администратора будут недоступны."
+            )
         return True
 
     @classmethod

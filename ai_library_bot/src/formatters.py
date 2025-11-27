@@ -6,7 +6,10 @@
 
 import re
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from src.analyzer import AnalysisResponse, Result
+from src.config import Config
 from src.utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -168,4 +171,68 @@ def format_start_message() -> str:
 • Расскажи о Python
 • Какие есть методы работы с данными?
 
+Вы можете выбрать интересующие вас категории книг ниже,
+или использовать все категории по умолчанию.
+
 Задайте ваш вопрос! 📚"""
+
+
+def format_categories_message(selected_categories: list[str] | None) -> str:
+    """Форматирует сообщение о выбранных категориях.
+
+    Args:
+        selected_categories: Список выбранных категорий или None (все категории).
+
+    Returns:
+        Markdown текст сообщения.
+    """
+    if selected_categories is None or len(selected_categories) == 0:
+        return """📚 **Категории книг**
+
+Выбраны все категории. Поиск будет выполняться по всем книгам.
+
+Используйте кнопки ниже, чтобы выбрать конкретные категории."""
+    
+    categories_str = ", ".join(selected_categories)
+    return f"""📚 **Выбранные категории**
+
+Вы выбрали следующие категории:
+• {categories_str}
+
+Поиск будет выполняться только по книгам из этих категорий.
+
+Используйте кнопки ниже, чтобы изменить выбор."""
+
+
+def create_categories_keyboard(selected_categories: list[str] | None = None) -> InlineKeyboardMarkup:
+    """Создает inline-клавиатуру для выбора категорий книг.
+
+    Args:
+        selected_categories: Список уже выбранных категорий или None.
+
+    Returns:
+        Объект InlineKeyboardMarkup с кнопками категорий.
+    """
+    if selected_categories is None:
+        selected_categories = []
+
+    keyboard_buttons = []
+    
+    # Создаем кнопки для каждой категории
+    for category in Config.CATEGORIES:
+        # Отмечаем выбранные категории галочкой
+        emoji = "✅ " if category in selected_categories else ""
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                f"{emoji}{category}",
+                callback_data=f"toggle_cat:{category}"
+            )
+        ])
+    
+    # Кнопки управления
+    keyboard_buttons.append([
+        InlineKeyboardButton("✅ Все категории", callback_data="select_all_cats"),
+        InlineKeyboardButton("❌ Сбросить", callback_data="clear_cats")
+    ])
+    
+    return InlineKeyboardMarkup(keyboard_buttons)

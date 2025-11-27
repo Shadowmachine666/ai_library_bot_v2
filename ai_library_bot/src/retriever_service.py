@@ -297,17 +297,20 @@ def _apply_smart_filtering(results: list[tuple[Any, float]]) -> list[tuple[Any, 
         return results
 
 
-async def retrieve_chunks(query: str) -> list[dict[str, Any]] | str:
+async def retrieve_chunks(query: str, filter_categories: list[str] | None = None) -> list[dict[str, Any]] | str:
     """Ищет релевантные чанки для запроса пользователя.
 
     Процесс:
     1. Создаёт эмбеддинг запроса
     2. Ищет в FAISS индексе top-k результатов
-    3. Фильтрует по порогу релевантности (score >= 0.7)
-    4. Возвращает релевантные чанки или NOT_FOUND
+    3. Фильтрует по категориям (если указаны)
+    4. Фильтрует по порогу релевантности (score >= 0.7)
+    5. Возвращает релевантные чанки или NOT_FOUND
 
     Args:
         query: Текст запроса пользователя.
+        filter_categories: Список категорий для фильтрации результатов.
+                          Если None, фильтрация по категориям не применяется.
 
     Returns:
         Список словарей с релевантными чанками или строка NOT_FOUND,
@@ -349,6 +352,117 @@ async def retrieve_chunks(query: str) -> list[dict[str, Any]] | str:
     results = await _search_in_faiss(retriever, query_embedding, top_k=Config.TOP_K)
     search_time = time.perf_counter() - search_start_time
     logger.debug(f"[RETRIEVER] Поиск в FAISS завершён за {search_time:.3f}с")
+
+    # Фильтрация по категориям (если указаны)
+    if filter_categories:
+        logger.info(f"[RETRIEVER] Фильтрация по категориям: {filter_categories}")
+        metadata = retriever["metadata"]
+        filtered_by_category = []
+        
+        # Нормализуем категории фильтра для сравнения
+        filter_categories_lower = [cat.lower() for cat in filter_categories]
+        logger.debug(
+            f"[RETRIEVER] Нормализованные категории фильтра: {filter_categories_lower}"
+        )
+        
+        for chunk_data, score in results:
+            # Получаем индекс чанка
+            chunk_idx = chunk_data.get("chunk_index", -1)
+            source = chunk_data.get("source", "unknown")
+            
+            logger.debug(
+                f"[RETRIEVER] [CATEGORY_FILTER] Обработка чанка {chunk_idx} "
+                f"(source={source}, score={score:.4f})"
+            )
+            
+            if chunk_idx >= 0 and chunk_idx < len(metadata):
+                chunk_meta = metadata[chunk_idx]
+                
+                # Логируем все ключи метаданных для отладки
+                logger.debug(
+                    f"[RETRIEVER] [CATEGORY_FILTER] Метаданные чанка {chunk_idx}: "
+                    f"ключи={list(chunk_meta.keys())}"
+                )
+                
+                # Получаем категории из метаданных
+                chunk_topics = chunk_meta.get("topics", [])
+                
+                logger.info(
+                    f"[RETRIEVER] [CATEGORY_FILTER] Чанк {chunk_idx} ({source}): "
+                    f"категории в метаданных={chunk_topics} (тип: {type(chunk_topics)})"
+                )
+                
+                # Проверяем, есть ли пересечение категорий
+                if chunk_topics:
+                    # Нормализуем категории чанка
+                    chunk_topics_lower = [
+                        topic.lower() if isinstance(topic, str) else str(topic).lower()
+                        for topic in chunk_topics
+                    ]
+                    logger.debug(
+                        f"[RETRIEVER] [CATEGORY_FILTER] Нормализованные категории чанка: "
+                        f"{chunk_topics_lower}"
+                    )
+                    
+                    # Проверяем пересечение
+                    has_match = any(
+                        topic_lower in filter_categories_lower
+                        for topic_lower in chunk_topics_lower
+                    )
+                    
+                    logger.info(
+                        f"[RETRIEVER] [CATEGORY_FILTER] Чанк {chunk_idx}: "
+                        f"пересечение найдено={has_match} "
+                        f"(категории чанка: {chunk_topics_lower}, "
+                        f"категории фильтра: {filter_categories_lower})"
+                    )
+                    
+                    if has_match:
+                        filtered_by_category.append((chunk_data, score))
+                        logger.debug(
+                            f"[RETRIEVER] [CATEGORY_FILTER] ✅ Чанк {chunk_idx} "
+                            f"прошел фильтрацию"
+                        )
+                    else:
+                        logger.info(
+                            f"[RETRIEVER] [CATEGORY_FILTER] ❌ Чанк {chunk_idx} отфильтрован: "
+                            f"нет пересечения категорий "
+                            f"(категории чанка: {chunk_topics}, фильтр: {filter_categories})"
+                        )
+                else:
+                    logger.warning(
+                        f"[RETRIEVER] [CATEGORY_FILTER] ⚠️ Чанк {chunk_idx} не имеет категорий "
+                        f"в метаданных (chunk_topics={chunk_topics}, тип: {type(chunk_topics)}). "
+                        f"Пропускаем при фильтрации."
+                    )
+            else:
+                # Если нет метаданных, пропускаем чанк (или оставляем, в зависимости от политики)
+                logger.warning(
+                    f"[RETRIEVER] [CATEGORY_FILTER] ⚠️ Не удалось получить метаданные для чанка "
+                    f"{chunk_idx} (всего метаданных: {len(metadata)}, "
+                    f"chunk_idx={chunk_idx}, source={source}). "
+                    f"Пропускаем при фильтрации по категориям."
+                )
+        
+        logger.info(
+            f"[RETRIEVER] [CATEGORY_FILTER] Результаты фильтрации: "
+            f"было {len(results)} результатов, "
+            f"осталось {len(filtered_by_category)} результатов"
+        )
+        
+        if filtered_by_category:
+            results = filtered_by_category
+            logger.info(
+                f"[RETRIEVER] ✅ После фильтрации по категориям: {len(results)} результатов"
+            )
+        else:
+            logger.warning(
+                f"[RETRIEVER] ⚠️ Все результаты отфильтрованы по категориям. "
+                f"Продолжаем без фильтрации по категориям. "
+                f"(Было {len(results)} результатов до фильтрации)"
+            )
+    else:
+        logger.debug("[RETRIEVER] Фильтрация по категориям не применяется")
 
     # Умная фильтрация (если включена)
     if Config.SMART_FILTERING_ENABLED:
