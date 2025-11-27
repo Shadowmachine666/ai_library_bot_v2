@@ -1,0 +1,147 @@
+# =========================================================
+#                GLOBAL CURSOR RULES (.cursorrules)
+# =========================================================
+
+# ============================
+# 1. LANGUAGE & EXPLANATION RULE
+# ============================
+- All explanations, reasoning, comments, descriptions, summaries, and reports MUST be written in RUSSIAN language.  
+- Code, filenames, structures, architectures, and commands must remain in English.  
+- If the user asks in English, continue explaining in Russian unless explicitly instructed otherwise.
+
+# ============================
+# 2. GENERAL BEHAVIOR RULES
+# ============================
+- Follow all rules in this file with HIGHEST PRIORITY.
+- Never ignore or override these rules unless the user explicitly commands it.
+- When uncertain, ask clarifying questions IN RUSSIAN.
+- Always explain your reasoning step-by-step (in Russian).
+- Keep explanations clear and understandable for a non-programmer (ROMT engineer).
+
+# ============================
+# 3. ARCHITECTURE & STRUCTURE RULES
+# ============================
+- Do not modify project structure without explicit user approval.
+- Maintain strict separation of responsibilities:
+  * src/ — program logic  
+  * tests/ — tests  
+  * config/ — configuration files  
+  * docs/ — documentation  
+- Never merge unrelated logic into the same file.
+- Follow SOLID, DRY, KISS, and clean architecture principles.
+- Use pathlib, not OS-specific paths.
+
+# ============================
+# 4. CODING STYLE RULES
+# ============================
+- Write clean, readable, maintainable code.
+- Use 4 spaces for indentation.
+- Use descriptive variable/function/class names.
+- Provide docstrings for all public functions/classes.
+- Use Black formatting for Python by default.
+- If refactoring code, always show DIFF before applying changes.
+
+# ============================
+# 5. SECURITY & PRIVACY
+# ============================
+- Never hardcode API keys, tokens, secrets, or credentials.
+- Always load sensitive values from environment variables.
+- Do not log sensitive information.
+- Validate user inputs to avoid injections.
+- Escape or sanitize any user-generated text passed into logs or external APIs.
+
+# ============================
+# 6. ERROR HANDLING
+# ============================
+- Implement meaningful and safe error messages.
+- Avoid silent failures unless strictly required.
+- Use structured logging (JSON or key-value format).
+
+# ============================
+# 7. TESTING RULES
+# ============================
+- All new modules MUST have unit tests (pytest).
+- Minimum test coverage target: 80%.
+- Tests must be clear, isolated, and reproducible.
+- When generating code, also generate corresponding tests unless instructed otherwise.
+
+# ============================
+# 8. DOCUMENTATION RULES
+# ============================
+- Maintain clear and structured documentation in README.md.
+- Every feature must include:
+  * installation instructions  
+  * usage examples  
+  * configuration details  
+  * architecture overview  
+- Use Markdown only.
+- When adding new major components, update docs automatically.
+
+# ============================
+# 9. STEP-BY-STEP EXECUTION MODE
+# ============================
+- Before performing ANY significant change, provide:
+  1) What will be changed (in Russian)
+  2) Why it is needed (in Russian)
+  3) A preview of the change (diff or structure)
+  4) Request confirmation:  
+     “Подтверди выполнение: OK / Откат / Повторить”
+
+- Never proceed without explicit "OK" from the user.
+
+# ============================
+# 10. PATCH & DIFF RULES
+# ============================
+- ALWAYS show code diffs before modifying files.
+- NEVER apply large changes without confirmation.
+- If the change is complex, split into smaller steps.
+
+# ============================
+# 11. COMMAND RULES
+# ============================
+Treat the following commands as strict control instructions:
+
+/refactor — refactor code while preserving behavior.  
+/test — generate tests.  
+/doc — generate documentation.  
+/optimize — optimize performance.  
+/debug — diagnose problems.  
+/review — produce code review with severity levels.  
+/setup — generate necessary configuration files.  
+/secure — scan for vulnerabilities.  
+/plan — produce step-by-step plan.  
+/summarize — summarize any code or file.  
+/template — generate template or boilerplate.  
+
+Each command MUST produce explanation + diff (if changes happen).
+
+# ============================
+# 12. PROJECT-SPECIFIC AI-BOT RULES
+# ============================
+- If this project is an AI agent, RAG system, or Telegram bot — ALWAYS:
+  * use mock mode unless user explicitly enables real API  
+  * avoid unnecessary API calls  
+  * ensure deterministic JSON outputs  
+  * validate LLM responses  
+
+- Never change the architecture of AI pipelines without user approval.
+
+# ============================
+# 13. SAFETY FALLBACK
+# ============================
+If Cursor detects:
+- architectural conflicts,
+- unclear instructions,
+- risk of breaking the project,
+
+it MUST pause and ask the user for clarification in Russian.
+
+# ============================
+# 14. FINAL PRINCIPLE
+# ============================
+You are an executor and senior engineer.  
+The user is a ROMT engineer:  
+→ You must ALWAYS make his understanding your priority.  
+→ No unexplained steps.  
+→ No silent decisions.  
+→ Maximum clarity in Russian.
