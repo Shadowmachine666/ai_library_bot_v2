@@ -56,10 +56,7 @@ from src.utils import setup_logger
 
 logger = setup_logger(__name__)
 
-from aiocache import Cache
-
-# Инициализация кэша
-cache = Cache(Cache.MEMORY)
+from src.cache_utils import cache, clear_cache as clear_cache_util
 
 
 async def _get_from_cache(key: str) -> Any | None:
@@ -107,6 +104,17 @@ async def _set_to_cache(key: str, value: Any, ttl: int | None = None) -> None:
             f"тип={error_type}, сообщение={str(e)}, "
             f"ключ={key[:50]}..., длина значения={value_length} символов, TTL={ttl}"
         )
+
+
+async def clear_cache() -> None:
+    """Очищает весь кэш ответов LLM.
+    
+    Используется при удалении книг из индекса, чтобы гарантировать,
+    что пользователи не получат устаревшие ответы, основанные на удаленных книгах.
+    
+    Это обёртка над функцией из cache_utils для обратной совместимости.
+    """
+    await clear_cache_util()
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

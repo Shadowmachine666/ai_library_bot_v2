@@ -28,6 +28,7 @@ from src.admin_messages import (
     format_confirmation_message,
     format_success_notification_message,
 )
+from src.cache_utils import clear_cache
 
 logger = setup_logger(__name__)
 
@@ -1571,25 +1572,34 @@ async def ingest_books(folder_path: str, force: bool = False) -> None:
             continue
 
     # Удаляем файлы из индекса
+    files_were_deleted = False
     if files_to_delete_from_index:
         logger.info(f"[INDEXING] Удаление {len(files_to_delete_from_index)} файлов из индекса (файлы удалены из папки)")
-    for file_path_str in files_to_delete_from_index:
-        file_path = Path(file_path_str)
-        logger.info(f"[INDEXING] Файл {file_path.name} удалён из папки, удаляем из индекса")
-        try:
-            await _remove_file_from_index(file_path, file_index)
-        except Exception as e:
-            logger.error(f"[INDEXING] ❌ Ошибка при удалении файла {file_path.name} из индекса: {e}")
+        for file_path_str in files_to_delete_from_index:
+            file_path = Path(file_path_str)
+            logger.info(f"[INDEXING] Файл {file_path.name} удалён из папки, удаляем из индекса")
+            try:
+                await _remove_file_from_index(file_path, file_index)
+                files_were_deleted = True
+            except Exception as e:
+                logger.error(f"[INDEXING] ❌ Ошибка при удалении файла {file_path.name} из индекса: {e}")
 
     # Удаляем старые чанки изменённых файлов
     if files_to_remove:
         logger.info(f"[INDEXING] Удаление старых чанков для {len(files_to_remove)} изменённых файлов")
-    for file_path in files_to_remove:
-        logger.info(f"[INDEXING] Удаление старых чанков изменённого файла: {file_path.name}")
-        try:
-            await _remove_file_from_index(file_path, file_index)
-        except Exception as e:
-            logger.error(f"[INDEXING] ❌ Ошибка при удалении старых чанков файла {file_path.name}: {e}")
+        for file_path in files_to_remove:
+            logger.info(f"[INDEXING] Удаление старых чанков изменённого файла: {file_path.name}")
+            try:
+                await _remove_file_from_index(file_path, file_index)
+                files_were_deleted = True
+            except Exception as e:
+                logger.error(f"[INDEXING] ❌ Ошибка при удалении старых чанков файла {file_path.name}: {e}")
+
+    # Очищаем кэш ответов LLM после удаления файлов/чанков
+    # Это гарантирует, что пользователи не получат устаревшие ответы, основанные на удаленных книгах
+    if files_were_deleted:
+        logger.info("[INDEXING] Очистка кэша ответов LLM после удаления файлов/чанков")
+        await clear_cache()
 
     # Индексируем новые/изменённые файлы
     processed = 0

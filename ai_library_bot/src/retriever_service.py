@@ -210,7 +210,7 @@ async def _search_in_faiss(
             chunk_data = {
                 "text": chunk_text,
                 "source": source,
-                "chunk_index": chunk_meta.get("chunk_index", idx),
+                "chunk_index": idx,  # Всегда используем глобальный индекс из FAISS (idx), а не из метаданных
             }
             logger.debug(f"[RETRIEVER] Чанк {i+1} (idx={idx}): source={chunk_data['source']}, text_length={len(chunk_text)}")
             logger.debug(f"[RETRIEVER] Метаданные чанка {idx}: {list(chunk_meta.keys())}")
