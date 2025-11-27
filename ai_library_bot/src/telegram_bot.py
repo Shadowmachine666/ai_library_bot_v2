@@ -20,10 +20,13 @@ from telegram.ext import (
 
 from src.admin_messages import (
     create_confirmation_keyboard,
+    create_index_books_keyboard,
     format_confirmation_message,
     format_confirmation_result_message,
     format_edit_categories_keyboard,
     format_edit_categories_message,
+    format_pending_books_list,
+    format_pending_books_message,
     format_pending_confirmations_list,
 )
 from src.admin_utils import is_admin, require_admin
@@ -37,7 +40,9 @@ from src.confirmation_manager import (
 )
 from src.ingest_service import (
     check_and_cleanup_expired_confirmations,
+    check_for_new_books,
     continue_indexing_after_confirmation,
+    ingest_books,
 )
 from src.formatters import (
     create_categories_keyboard,
@@ -48,6 +53,13 @@ from src.formatters import (
     format_start_message,
 )
 from src.retriever_service import NOT_FOUND, retrieve_chunks
+from src.pending_books_manager import (
+    add_pending_book,
+    get_pending_books,
+    mark_notification_sent,
+    remove_missing_files,
+    remove_pending_book,
+)
 from src.query_context import (
     cleanup_expired_contexts,
     delete_query_context,
@@ -1268,6 +1280,232 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+async def check_and_notify_new_books(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Проверяет наличие новых книг и отправляет уведомление администратору.
+    
+    Args:
+        context: Контекст бота для отправки сообщений.
+    """
+    if not Config.ADMIN_TELEGRAM_ID:
+        logger.debug("[NEW_BOOKS] ADMIN_TELEGRAM_ID не установлен, пропускаем проверку новых книг")
+        return
+    
+    # Путь к папке с книгами (по умолчанию)
+    books_folder = "./data/books"
+    
+    try:
+        # Удаляем несуществующие файлы из списка ожидания
+        remove_missing_files()
+        
+        # Проверяем новые книги
+        new_files = await check_for_new_books(books_folder)
+        
+        if not new_files:
+            logger.debug("[NEW_BOOKS] Новых книг не найдено")
+            return
+        
+        # Добавляем новые книги в список ожидания
+        added_count = 0
+        for file_path in new_files:
+            if add_pending_book(file_path):
+                added_count += 1
+        
+        if added_count == 0:
+            logger.debug("[NEW_BOOKS] Все новые книги уже в списке ожидания")
+            return
+        
+        logger.info(f"[NEW_BOOKS] Добавлено {added_count} новых книг в список ожидания")
+        
+        # Получаем список непроиндексированных книг (включая только те, для которых не отправлялось уведомление)
+        pending_books = get_pending_books()
+        books_to_notify = [book for book in pending_books if not book.get("notification_sent", False)]
+        
+        if not books_to_notify:
+            logger.debug("[NEW_BOOKS] Нет книг для уведомления (все уведомления уже отправлены)")
+            return
+        
+        # Отправляем уведомление администратору
+        message_text = format_pending_books_message(books_to_notify)
+        keyboard = create_index_books_keyboard()
+        
+        try:
+            sent_message = await context.bot.send_message(
+                chat_id=Config.ADMIN_TELEGRAM_ID,
+                text=message_text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            
+            # Отмечаем, что уведомление отправлено для всех книг
+            for book in books_to_notify:
+                mark_notification_sent(book["file_path"], sent_message.message_id)
+            
+            logger.info(
+                f"[NEW_BOOKS] ✅ Уведомление о {len(books_to_notify)} новых книгах отправлено администратору"
+            )
+        except Exception as e:
+            logger.error(
+                f"[NEW_BOOKS] ❌ Ошибка при отправке уведомления администратору: {e}",
+                exc_info=True
+            )
+    
+    except Exception as e:
+        logger.error(
+            f"[NEW_BOOKS] ❌ Ошибка при проверке новых книг: {e}",
+            exc_info=True
+        )
+
+
+async def handle_index_books_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик callback для индексации непроиндексированных книг.
+    
+    Обрабатывает:
+    - index_books:confirm - запуск индексации
+    - index_books:cancel - отмена (удаление уведомления)
+    - index_books:list - показать детальный список
+    
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    query = update.callback_query
+    user = update.effective_user
+    
+    if not query or not user:
+        return
+    
+    # Проверка прав администратора
+    if not is_admin(user.id):
+        await query.answer("❌ У вас нет прав администратора", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    callback_data = query.data
+    logger.info(f"[INDEX_BOOKS] Получен callback: {callback_data} от администратора {user.id}")
+    
+    try:
+        if callback_data == "index_books:confirm":
+            # Запуск индексации
+            pending_books = get_pending_books()
+            
+            if not pending_books:
+                await query.message.edit_text("✅ Нет непроиндексированных книг.")
+                return
+            
+            # Обновляем сообщение
+            await query.message.edit_text("🔄 Начинаю индексацию книг...")
+            
+            # Запускаем индексацию
+            books_folder = "./data/books"
+            
+            try:
+                await ingest_books(books_folder, force=False)
+                
+                # Проверяем, сколько книг осталось в списке ожидания
+                remaining_books = get_pending_books()
+                
+                if remaining_books:
+                    message = (
+                        f"✅ *Индексация завершена*\n\n"
+                        f"Некоторые книги могут требовать подтверждения категорий.\n"
+                        f"Осталось непроиндексированных: {len(remaining_books)}"
+                    )
+                else:
+                    message = (
+                        f"✅ *Индексация завершена*\n\n"
+                        f"Все книги успешно проиндексированы!"
+                    )
+                
+                await query.message.edit_text(message, parse_mode="Markdown")
+                logger.info(f"[INDEX_BOOKS] ✅ Индексация завершена администратором {user.id}")
+                
+            except Exception as e:
+                error_msg = f"❌ Ошибка при индексации: {str(e)}"
+                await query.message.edit_text(error_msg)
+                logger.error(f"[INDEX_BOOKS] ❌ Ошибка при индексации: {e}", exc_info=True)
+        
+        elif callback_data == "index_books:cancel":
+            # Отмена - просто удаляем уведомление, книги остаются
+            await query.message.edit_text(
+                "❌ Индексация отменена.\n\n"
+                "Книги остаются в папке, но не будут проиндексированы.\n"
+                "Вы можете запустить индексацию позже через команду /pending_books"
+            )
+            logger.info(f"[INDEX_BOOKS] Индексация отменена администратором {user.id}")
+        
+        elif callback_data == "index_books:list":
+            # Показать детальный список
+            pending_books = get_pending_books()
+            message_text = format_pending_books_list(pending_books)
+            keyboard = create_index_books_keyboard()
+            
+            try:
+                await query.message.edit_text(
+                    message_text,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"[INDEX_BOOKS] Ошибка при отправке списка: {e}")
+                await query.message.edit_text(
+                    "❌ Ошибка при формировании списка книг."
+                )
+    
+    except Exception as e:
+        logger.error(
+            f"[INDEX_BOOKS] ❌ Ошибка при обработке callback: {e}",
+            exc_info=True
+        )
+        try:
+            await query.answer("❌ Произошла ошибка", show_alert=True)
+        except Exception:
+            pass
+
+
+async def pending_books_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /pending_books для просмотра непроиндексированных книг.
+    
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    
+    # Проверка прав администратора
+    if not is_admin(user.id):
+        await update.message.reply_text("❌ У вас нет прав администратора")
+        logger.warning(f"Попытка доступа к /pending_books от неавторизованного пользователя: {user.id}")
+        return
+    
+    logger.info(f"Команда /pending_books от администратора {user.id}")
+    
+    # Получаем непроиндексированные книги
+    pending_books = get_pending_books()
+    
+    if not pending_books:
+        await update.message.reply_text("✅ Нет непроиндексированных книг.")
+        return
+    
+    # Форматируем список
+    message_text = format_pending_books_message(pending_books)
+    keyboard = create_index_books_keyboard()
+    
+    try:
+        await update.message.reply_text(
+            message_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке списка непроиндексированных книг: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при формировании списка книг."
+        )
+
+
 async def pending_confirmations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /pending для просмотра ожидающих подтверждений.
 
@@ -1327,6 +1565,7 @@ def create_bot_application() -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("categories", categories_command))
     application.add_handler(CommandHandler("pending", pending_confirmations_command))
+    application.add_handler(CommandHandler("pending_books", pending_books_command))
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -1368,8 +1607,8 @@ def create_bot_application() -> Application:
     )
 
     logger.info(
-        "Обработчики зарегистрированы: /start, /help, /categories, /pending, /cleanup, текстовые сообщения, "
-        "callback для подтверждений, callback для категорий"
+        "Обработчики зарегистрированы: /start, /help, /categories, /pending, /pending_books, /cleanup, "
+        "текстовые сообщения, callback для подтверждений, callback для категорий, callback для индексации книг"
     )
 
     return application
@@ -1486,6 +1725,22 @@ async def run_bot() -> None:
         )
     else:
         logger.warning("JobQueue недоступен, фоновая проверка таймаутов не будет выполняться")
+    
+    # Регистрация периодической задачи для проверки новых книг
+    if job_queue:
+        # Проверка каждые 10 минут (600 секунд)
+        job_queue.run_repeating(
+            check_and_notify_new_books,
+            interval=600,  # 10 минут в секундах
+            first=60,  # Первый запуск через 60 секунд после старта
+            name="check_new_books",
+        )
+        logger.info(
+            "Фоновая задача для проверки новых книг зарегистрирована "
+            "(интервал: 10 минут, первый запуск: через 60 секунд)"
+        )
+    else:
+        logger.warning("JobQueue недоступен, фоновая проверка новых книг не будет выполняться")
 
     # Запуск бота
     logger.info("Бот запущен и готов к работе")
@@ -1503,6 +1758,9 @@ async def run_bot() -> None:
         if application.bot:
             startup_context = StartupContext(application.bot)
             await send_pending_notifications_on_startup(startup_context)
+            
+            # Проверяем новые книги при старте
+            await check_and_notify_new_books(startup_context)
         
         # Очищаем истекшие контексты запросов при старте
         expired_count = cleanup_expired_contexts()

@@ -414,6 +414,116 @@ def format_edit_categories_message(
     return message
 
 
+def format_pending_books_message(pending_books: list[dict[str, Any]]) -> str:
+    """Форматирует сообщение о непроиндексированных книгах.
+    
+    Args:
+        pending_books: Список словарей с информацией о непроиндексированных книгах.
+    
+    Returns:
+        Отформатированное сообщение в Markdown.
+    """
+    if not pending_books:
+        return "✅ Нет непроиндексированных книг."
+    
+    count = len(pending_books)
+    message_parts = [
+        f"📚 *Обнаружены новые книги*\n\n",
+        f"Найдено непроиндексированных книг: *{count}*\n\n"
+    ]
+    
+    # Показываем список книг (максимум 10, чтобы не перегружать сообщение)
+    max_show = min(10, count)
+    for i, book in enumerate(pending_books[:max_show], 1):
+        file_name = book.get("file_name", "unknown")
+        file_size_mb = book.get("file_size", 0) / (1024 * 1024)
+        file_name_escaped = escape_markdown(file_name)
+        message_parts.append(f"{i}\\. `{file_name_escaped}` \\({file_size_mb:.2f} MB\\)\n")
+    
+    if count > max_show:
+        message_parts.append(f"\n\\.\\.\\. и еще {count - max_show} книг\\.\\.\\.\n")
+    
+    message_parts.append(
+        "\nВыберите действие:\n"
+        "• *Индексировать* — начать индексацию всех книг\n"
+        "• *Отмена* — оставить книги без индексации"
+    )
+    
+    return "".join(message_parts)
+
+
+def create_index_books_keyboard() -> InlineKeyboardMarkup:
+    """Создает клавиатуру для уведомления о непроиндексированных книгах.
+    
+    Returns:
+        Объект InlineKeyboardMarkup с кнопками индексации.
+    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ Индексировать",
+                callback_data="index_books:confirm"
+            ),
+            InlineKeyboardButton(
+                "❌ Отмена",
+                callback_data="index_books:cancel"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📋 Показать список",
+                callback_data="index_books:list"
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def format_pending_books_list(pending_books: list[dict[str, Any]]) -> str:
+    """Форматирует детальный список непроиндексированных книг.
+    
+    Args:
+        pending_books: Список словарей с информацией о непроиндексированных книгах.
+    
+    Returns:
+        Отформатированное сообщение в Markdown.
+    """
+    if not pending_books:
+        return "✅ Нет непроиндексированных книг."
+    
+    message_parts = [
+        f"📚 *Список непроиндексированных книг*\n\n",
+        f"Всего: *{len(pending_books)}* книг\n\n"
+    ]
+    
+    for i, book in enumerate(pending_books, 1):
+        file_name = book.get("file_name", "unknown")
+        file_size_mb = book.get("file_size", 0) / (1024 * 1024)
+        added_at = book.get("added_at", "")
+        
+        file_name_escaped = escape_markdown(file_name)
+        
+        # Форматируем дату добавления
+        date_str = ""
+        if added_at:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(added_at)
+                date_str = dt.strftime("%d\\.%m\\.%Y %H:%M")
+            except (ValueError, TypeError):
+                date_str = added_at
+        
+        message_parts.append(
+            f"{i}\\. *{file_name_escaped}*\n"
+            f"   Размер: {file_size_mb:.2f} MB\n"
+        )
+        if date_str:
+            message_parts.append(f"   Добавлено: {date_str}\n")
+        message_parts.append("\n")
+    
+    return "".join(message_parts)
+
+
 def format_success_notification_message(
     book_title: str, file_name: str, categories: list[str], chunks_count: int
 ) -> str:

@@ -29,6 +29,7 @@ from src.admin_messages import (
     format_success_notification_message,
 )
 from src.cache_utils import clear_cache
+from src.pending_books_manager import remove_pending_book
 
 logger = setup_logger(__name__)
 
@@ -1483,6 +1484,55 @@ async def continue_indexing_after_confirmation(request_id: str) -> bool:
         return False
 
 
+async def check_for_new_books(folder_path: str) -> list[Path]:
+    """Проверяет наличие новых книг в папке, которые еще не проиндексированы.
+    
+    Сравнивает файлы в папке с индексом проиндексированных файлов и возвращает
+    список новых файлов, которые нужно добавить в pending_books.
+    
+    Args:
+        folder_path: Путь к папке с книгами.
+    
+    Returns:
+        Список путей к новым файлам, которые еще не проиндексированы.
+    """
+    folder = Path(folder_path)
+    
+    if not folder.exists() or not folder.is_dir():
+        logger.warning(f"[NEW_BOOKS_CHECK] Папка не существует или не является директорией: {folder_path}")
+        return []
+    
+    # Загружаем индекс файлов
+    file_index = _load_file_index()
+    
+    # Поиск всех поддерживаемых файлов в папке
+    files_in_folder: list[Path] = []
+    for ext in SUPPORTED_EXTENSIONS:
+        files_in_folder.extend(folder.glob(f"*{ext}"))
+        files_in_folder.extend(folder.glob(f"*{ext.upper()}"))
+    
+    # Убираем дубликаты
+    files_in_folder = list(dict.fromkeys(files_in_folder))
+    
+    # Проверяем, какие файлы новые (не в индексе)
+    new_files: list[Path] = []
+    
+    for file_path in files_in_folder:
+        file_path_str = str(file_path.absolute())
+        
+        # Если файла нет в индексе - это новый файл
+        if file_path_str not in file_index:
+            new_files.append(file_path)
+            logger.debug(f"[NEW_BOOKS_CHECK] Найден новый файл: {file_path.name}")
+    
+    if new_files:
+        logger.info(f"[NEW_BOOKS_CHECK] Найдено {len(new_files)} новых книг в папке {folder_path}")
+    else:
+        logger.debug(f"[NEW_BOOKS_CHECK] Новых книг не найдено в папке {folder_path}")
+    
+    return new_files
+
+
 async def ingest_books(folder_path: str, force: bool = False) -> None:
     """Основная функция индексации книг из папки.
 
@@ -1620,6 +1670,9 @@ async def ingest_books(folder_path: str, force: bool = False) -> None:
                     pending_confirmation += 1
                 else:
                     processed += 1
+                    # Удаляем книгу из списка ожидания после успешной индексации
+                    remove_pending_book(file_path)
+                    logger.debug(f"[INDEXING] Книга {file_path.name} удалена из списка ожидания после успешной индексации")
             except Exception as e:
                 errors += 1
                 logger.error(
