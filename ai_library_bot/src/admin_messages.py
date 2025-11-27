@@ -149,9 +149,13 @@ def format_pending_confirmations_list(confirmations: list[dict[str, Any]]) -> st
     if not confirmations:
         return "✅ Нет ожидающих подтверждений."
 
+    from datetime import datetime, timedelta
+
     message_parts = [
         f"📋 *Ожидающие подтверждения: {len(confirmations)}*\n",
     ]
+
+    now = datetime.now()
 
     for i, req in enumerate(confirmations, 1):
         request_id = req.get("request_id", "unknown")
@@ -160,14 +164,31 @@ def format_pending_confirmations_list(confirmations: list[dict[str, Any]]) -> st
         file_name = file_path.name if file_path else "Неизвестно"
         created_at = req.get("created_at", "")
 
-        # Форматируем дату
+        # Форматируем дату и вычисляем возраст
         try:
-            from datetime import datetime
-
             dt = datetime.fromisoformat(created_at)
             date_str = dt.strftime("%d.%m.%Y %H:%M")
+            
+            # Вычисляем возраст запроса
+            age_delta = now - dt
+            age_hours = age_delta.total_seconds() / 3600
+            
+            if age_hours < 1:
+                age_str = f"{int(age_delta.total_seconds() / 60)} мин"
+            elif age_hours < 24:
+                age_str = f"{int(age_hours)} ч"
+            else:
+                age_days = int(age_delta.days)
+                age_str = f"{age_days} дн"
+            
+            # Добавляем предупреждение для старых запросов
+            if age_hours >= 24:
+                age_str = f"⚠️ {age_str} (старше 1 дня)"
+            elif age_hours >= 12:
+                age_str = f"⏰ {age_str}"
         except (ValueError, TypeError):
             date_str = created_at
+            age_str = "неизвестно"
 
         # Экранируем специальные символы Markdown
         book_title_escaped = escape_markdown(book_title)
@@ -177,7 +198,7 @@ def format_pending_confirmations_list(confirmations: list[dict[str, Any]]) -> st
         message_parts.append(
             f"{i}. *{book_title_escaped}*\n"
             f"   📁 `{file_name_escaped}`\n"
-            f"   🕐 {date_str}\n"
+            f"   🕐 {date_str} ({age_str})\n"
             f"   ID: `{request_id_escaped}`\n"
         )
 
@@ -388,6 +409,38 @@ def format_edit_categories_message(
         f"📁 *Файл:* `{file_name_escaped}`\n\n"
         f"*Текущие категории:* {categories_str}\n\n"
         f"Выберите категории из списка ниже:"
+    )
+
+    return message
+
+
+def format_success_notification_message(
+    book_title: str, file_name: str, categories: list[str], chunks_count: int
+) -> str:
+    """Форматирует сообщение об успешной индексации файла.
+
+    Args:
+        book_title: Название книги.
+        file_name: Имя файла.
+        categories: Список категорий.
+        chunks_count: Количество созданных чанков.
+
+    Returns:
+        Отформатированное сообщение в Markdown V2.
+    """
+    # Экранируем специальные символы Markdown
+    book_title_escaped = escape_markdown(book_title)
+    file_name_escaped = escape_markdown(file_name)
+
+    categories_str = ", ".join(categories) if categories else "не указаны"
+
+    message = (
+        f"✅ *Файл успешно проиндексирован*\n\n"
+        f"📖 *Название:* {book_title_escaped}\n"
+        f"📁 *Файл:* `{file_name_escaped}`\n"
+        f"📋 *Категории:* {categories_str}\n"
+        f"📊 *Чанков создано:* {chunks_count}\n\n"
+        f"*Статус:* Проиндексирован автоматически \\(категории найдены в имени файла\\)"
     )
 
     return message

@@ -164,12 +164,53 @@ def update_confirmation_status(
     return True
 
 
+def validate_pending_requests() -> int:
+    """Валидирует pending запросы: проверяет существование файлов.
+    
+    Если файл не существует, помечает запрос как "timeout".
+    
+    Returns:
+        Количество запросов, помеченных как timeout из-за отсутствия файлов.
+    """
+    confirmations = _load_confirmations()
+    timeout_count = 0
+    
+    for request_id, req in confirmations.items():
+        if req.get("status") != "pending":
+            continue
+            
+        file_path_str = req.get("file_path", "")
+        if not file_path_str:
+            logger.warning(f"Запрос {request_id} не имеет file_path, пропускаем валидацию")
+            continue
+            
+        file_path = Path(file_path_str)
+        if not file_path.exists():
+            logger.warning(
+                f"Файл для запроса {request_id} не найден: {file_path}. "
+                f"Помечаем запрос как timeout."
+            )
+            req["status"] = "timeout"
+            timeout_count += 1
+    
+    if timeout_count > 0:
+        _save_confirmations(confirmations)
+        logger.info(f"Валидация завершена: {timeout_count} запросов помечено как timeout")
+    
+    return timeout_count
+
+
 def get_pending_confirmations() -> list[dict[str, Any]]:
     """Получает все ожидающие подтверждения.
+
+    Перед возвратом валидирует запросы: проверяет существование файлов.
 
     Returns:
         Список запросов со статусом "pending".
     """
+    # Валидируем запросы перед возвратом
+    validate_pending_requests()
+    
     confirmations = _load_confirmations()
     pending = [
         req for req in confirmations.values() if req.get("status") == "pending"
@@ -279,14 +320,19 @@ def get_all_confirmations() -> dict[str, dict[str, Any]]:
     return _load_confirmations()
 
 
-def cleanup_old_confirmations(days: int = 7) -> int:
-    """Удаляет старые обработанные запросы.
+def cleanup_old_confirmations(days: int = 1, ignore_age: bool = False, include_pending: bool = False) -> int:
+    """Удаляет обработанные запросы.
 
-    Удаляет запросы со статусом "approved", "rejected" или "timeout",
-    которые старше указанного количества дней.
+    Удаляет запросы со статусом "approved", "rejected" или "timeout".
+    Если ignore_age=False, удаляет только запросы старше указанного количества дней.
+    Если ignore_age=True, удаляет все обработанные запросы независимо от возраста.
+    Если include_pending=True, также удаляет все pending запросы.
 
     Args:
-        days: Количество дней для хранения старых запросов.
+        days: Количество дней для хранения старых запросов (по умолчанию 1 день).
+              Используется только если ignore_age=False.
+        ignore_age: Если True, удаляет все обработанные запросы независимо от возраста.
+        include_pending: Если True, также удаляет все pending запросы.
 
     Returns:
         Количество удалённых запросов.
@@ -294,19 +340,28 @@ def cleanup_old_confirmations(days: int = 7) -> int:
     confirmations = _load_confirmations()
     deleted_count = 0
 
-    cutoff_date = datetime.now() - timedelta(days=days)
     old_statuses = {"approved", "rejected", "timeout"}
+    if include_pending:
+        old_statuses.add("pending")
 
     to_delete = []
     for request_id, request in confirmations.items():
-        if request.get("status") not in old_statuses:
+        status = request.get("status")
+        if status not in old_statuses:
             continue
 
+        # Если ignore_age=True, удаляем все запросы с нужными статусами
+        if ignore_age:
+            to_delete.append(request_id)
+            continue
+
+        # Иначе проверяем возраст (старое поведение)
         created_at_str = request.get("created_at")
         if not created_at_str:
             continue
 
         try:
+            cutoff_date = datetime.now() - timedelta(days=days)
             created_at = datetime.fromisoformat(created_at_str)
             if created_at < cutoff_date:
                 to_delete.append(request_id)
@@ -319,7 +374,13 @@ def cleanup_old_confirmations(days: int = 7) -> int:
 
     if deleted_count > 0:
         _save_confirmations(confirmations)
-        logger.info(f"Удалено {deleted_count} старых запросов (старше {days} дней)")
+        status_list = "approved, rejected, timeout"
+        if include_pending:
+            status_list += ", pending"
+        if ignore_age:
+            logger.info(f"Удалено {deleted_count} запросов (статусы: {status_list}, все независимо от возраста)")
+        else:
+            logger.info(f"Удалено {deleted_count} старых запросов (статусы: {status_list}, старше {days} дней)")
 
     return deleted_count
 

@@ -886,6 +886,103 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /help для отображения справки по командам.
+
+    Показывает список всех доступных команд с описаниями.
+    Для администраторов показывает дополнительные команды.
+
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    user = update.effective_user
+    if not user or not update.message:
+        return
+
+    logger.info(f"Команда /help от пользователя {user.id}")
+
+    # Базовые команды для всех пользователей
+    help_text = "📚 *Доступные команды:*\n\n"
+    help_text += "`/start` - Начать работу с ботом\n"
+    help_text += "`/help` - Показать эту справку\n\n"
+
+    # Проверяем, является ли пользователь администратором
+    if is_admin(user.id):
+        help_text += "🔐 *Команды администратора:*\n\n"
+        help_text += "`/pending` - Показать список ожидающих подтверждения файлов\n"
+        help_text += "`/cleanup` - Очистить старые запросы (старше 1 дня)\n"
+        help_text += "`/categories` - Управление категориями для фильтрации\n\n"
+        logger.info(f"Показана справка для администратора {user.id}")
+    else:
+        logger.info(f"Показана справка для обычного пользователя {user.id}")
+
+    help_text += "💡 *Как использовать бота:*\n\n"
+    help_text += "Просто отправьте боту ваш вопрос, и он ответит на основе загруженных книг.\n\n"
+    help_text += "Бот использует искусственный интеллект для поиска релевантной информации в библиотеке."
+
+    try:
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке справки: {e}")
+        # Отправляем без Markdown в случае ошибки
+        help_text_plain = help_text.replace("*", "").replace("`", "")
+        await update.message.reply_text(help_text_plain)
+
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /cleanup для очистки старых запросов.
+
+    Удаляет запросы со статусами "approved", "rejected", "timeout",
+    которые старше 1 дня.
+
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    from src.confirmation_manager import cleanup_old_confirmations
+
+    user = update.effective_user
+    if not user or not update.message:
+        return
+
+    # Проверка прав администратора
+    if not is_admin(user.id):
+        await update.message.reply_text("❌ У вас нет прав администратора")
+        logger.warning(f"Попытка доступа к /cleanup от неавторизованного пользователя: {user.id}")
+        return
+
+    logger.info(f"Команда /cleanup от администратора {user.id}")
+
+    try:
+        # Очищаем все запросы (обработанные + pending) независимо от возраста
+        deleted_count = cleanup_old_confirmations(ignore_age=True, include_pending=True)
+
+        if deleted_count > 0:
+            message = (
+                f"🧹 *Очистка всех запросов*\n\n"
+                f"✅ Удалено запросов: *{deleted_count}*\n\n"
+                f"Удалены все запросы со статусами: approved, rejected, timeout, pending\n"
+                f"(независимо от возраста)"
+            )
+            logger.info(f"Очищено {deleted_count} запросов (включая pending) администратором {user.id}")
+        else:
+            message = (
+                f"🧹 *Очистка всех запросов*\n\n"
+                f"✅ Запросов для удаления не найдено.\n\n"
+                f"Все запросы актуальны (младше 1 дня)."
+            )
+            logger.info(f"Старых запросов не найдено для очистки")
+
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Ошибка при очистке старых запросов: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ Произошла ошибка при очистке старых запросов."
+        )
+
+
 async def pending_confirmations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /pending для просмотра ожидающих подтверждений.
 
@@ -942,8 +1039,10 @@ def create_bot_application() -> Application:
 
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("categories", categories_command))
     application.add_handler(CommandHandler("pending", pending_confirmations_command))
+    application.add_handler(CommandHandler("cleanup", cleanup_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Регистрация обработчиков callback для подтверждений
@@ -968,7 +1067,7 @@ def create_bot_application() -> Application:
     )
 
     logger.info(
-        "Обработчики зарегистрированы: /start, /categories, /pending, текстовые сообщения, "
+        "Обработчики зарегистрированы: /start, /help, /categories, /pending, /cleanup, текстовые сообщения, "
         "callback для подтверждений, callback для категорий"
     )
 
@@ -986,6 +1085,12 @@ async def send_pending_notifications_on_startup(context: ContextTypes.DEFAULT_TY
     from src.confirmation_manager import get_all_confirmations
 
     logger.info("[STARTUP] Проверка накопленных уведомлений о подтверждении категорий...")
+    
+    # Автоматическая очистка старых запросов при старте
+    from src.confirmation_manager import cleanup_old_confirmations
+    cleaned_count = cleanup_old_confirmations(days=1)
+    if cleaned_count > 0:
+        logger.info(f"[STARTUP] Автоматически очищено {cleaned_count} старых запросов (старше 1 дня)")
     
     all_confirmations = get_all_confirmations()
     pending_without_message = [

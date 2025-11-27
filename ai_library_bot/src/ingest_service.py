@@ -26,6 +26,7 @@ from src.confirmation_manager import (
 from src.admin_messages import (
     create_confirmation_keyboard,
     format_confirmation_message,
+    format_success_notification_message,
 )
 
 logger = setup_logger(__name__)
@@ -90,6 +91,57 @@ async def _send_notification_to_admin_direct(request: dict[str, Any]) -> int | N
             exc_info=True,
         )
         return None
+
+
+async def _send_success_notification(
+    book_title: str, file_path: Path, categories: list[str], chunks_count: int
+) -> None:
+    """Отправляет информационное уведомление администратору об успешной индексации файла.
+
+    Args:
+        book_title: Название книги.
+        file_path: Путь к файлу.
+        categories: Список категорий.
+        chunks_count: Количество созданных чанков.
+    """
+    admin_id = Config.ADMIN_TELEGRAM_ID
+    if not admin_id:
+        logger.debug(
+            "ADMIN_TELEGRAM_ID не установлен, уведомление об успешной индексации не будет отправлено"
+        )
+        return
+
+    if not Config.TG_TOKEN:
+        logger.debug(
+            "TG_TOKEN не установлен, уведомление об успешной индексации не будет отправлено"
+        )
+        return
+
+    try:
+        from telegram import Bot
+
+        bot = Bot(token=Config.TG_TOKEN)
+        message_text = format_success_notification_message(
+            book_title, file_path.name, categories, chunks_count
+        )
+
+        await bot.send_message(
+            chat_id=admin_id,
+            text=message_text,
+            parse_mode="Markdown",
+        )
+
+        logger.info(
+            f"[INDEXING] ✅ Уведомление об успешной индексации отправлено администратору {admin_id} "
+            f"для файла {file_path.name}"
+        )
+
+    except Exception as e:
+        logger.warning(
+            f"[INDEXING] ⚠️ Ошибка при отправке уведомления об успешной индексации "
+            f"администратору {admin_id}: {e}",
+            exc_info=True,
+        )
 
 # Тип для индекса файлов
 FileIndex = dict[str, dict[str, Any]]
@@ -1340,6 +1392,13 @@ async def _continue_indexing_with_categories(
         f"[INDEXING] ✅ Файл {file_path.name} успешно обработан: "
         f"{len(chunks)} чанков, категории: {categories}"
     )
+    
+    # Отправляем уведомление администратору об успешной индексации
+    book_title = metadata_base.get("title", file_path.stem)
+    await _send_success_notification(
+        book_title, file_path, categories, len(chunks)
+    )
+    
     logger.info(f"[INDEXING] ===== Обработка файла {file_path.name} завершена =====\n")
 
 
