@@ -41,11 +41,19 @@ from src.ingest_service import (
 )
 from src.formatters import (
     create_categories_keyboard,
+    create_query_categories_keyboard,
+    create_response_keyboard,
     format_categories_message,
     format_response,
     format_start_message,
 )
 from src.retriever_service import NOT_FOUND, retrieve_chunks
+from src.query_context import (
+    cleanup_expired_contexts,
+    delete_query_context,
+    get_query_context,
+    save_query_context,
+)
 from src.user_categories import (
     clear_user_categories,
     get_user_categories,
@@ -143,6 +151,227 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+async def _process_query_with_categories(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_query: str,
+    filter_categories: list[str] | None,
+    user_id: int,
+    processing_message: Any | None = None,
+) -> None:
+    """Обрабатывает запрос пользователя с указанными категориями.
+    
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+        user_query: Текст запроса пользователя.
+        filter_categories: Категории для фильтрации (None = все категории).
+        user_id: ID пользователя.
+        processing_message: Сообщение "Ищу информацию..." (если уже создано).
+    """
+    if processing_message is None:
+        processing_message = await update.message.reply_text("🔍 Ищу информацию...")
+    
+    total_start_time = time.perf_counter()
+    
+    try:
+        # 1. Проверка кэша (с учетом категорий)
+        cache_start_time = time.perf_counter()
+        logger.info(f"[TELEGRAM_BOT] Этап 1/7: Проверка кэша")
+        cache_key = f"query:{user_query.lower()}:cats:{sorted(filter_categories) if filter_categories else 'all'}"
+        cached_response = await _get_from_cache(cache_key)
+        cache_time = time.perf_counter() - cache_start_time
+
+        if cached_response:
+            total_time = time.perf_counter() - total_start_time
+            logger.info(
+                f"[TELEGRAM_BOT] ✅ Ответ найден в кэше для запроса: {user_query[:50]}... "
+                f"(время проверки кэша: {cache_time:.3f}с, общее время: {total_time:.3f}с)"
+            )
+            # Сохраняем контекст запроса для кнопки изменения категорий
+            query_hash = save_query_context(user_id, user_query, filter_categories)
+            keyboard = create_response_keyboard(query_hash)
+            await processing_message.edit_text(
+                cached_response,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            return
+        
+        logger.info(
+            f"[TELEGRAM_BOT] Кэш не содержит ответа, продолжаем обработку "
+            f"(время проверки кэша: {cache_time:.3f}с)"
+        )
+
+        # 2. Поиск релевантных чанков
+        retrieval_start_time = time.perf_counter()
+        logger.info(f"[TELEGRAM_BOT] Этап 2/7: Поиск релевантных чанков")
+        chunks = await retrieve_chunks(user_query, filter_categories=filter_categories)
+        retrieval_time = time.perf_counter() - retrieval_start_time
+
+        if chunks == NOT_FOUND:
+            total_time = time.perf_counter() - total_start_time
+            logger.warning(
+                f"[TELEGRAM_BOT] ❌ Не найдено релевантных чанков для запроса: {user_query[:50]}... "
+                f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
+            )
+            response_text = format_response(
+                AnalysisResponse(status="NOT_FOUND", clarification_question=None, result=None),
+                used_categories=filter_categories
+            )
+            # Сохраняем контекст запроса
+            query_hash = save_query_context(user_id, user_query, filter_categories)
+            keyboard = create_response_keyboard(query_hash)
+            await processing_message.edit_text(
+                response_text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            return
+        
+        if not isinstance(chunks, list):
+            total_time = time.perf_counter() - total_start_time
+            logger.error(
+                f"[TELEGRAM_BOT] ❌ Неожиданный тип chunks: {type(chunks)} "
+                f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
+            )
+            response_text = format_response(
+                AnalysisResponse(status="NOT_FOUND", clarification_question=None, result=None),
+                used_categories=filter_categories
+            )
+            query_hash = save_query_context(user_id, user_query, filter_categories)
+            keyboard = create_response_keyboard(query_hash)
+            await processing_message.edit_text(
+                response_text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            return
+
+        logger.info(
+            f"[TELEGRAM_BOT] ✅ Найдено {len(chunks)} релевантных чанков "
+            f"(время поиска: {retrieval_time:.3f}с)"
+        )
+
+        # 3. Анализ чанков
+        analysis_start_time = time.perf_counter()
+        logger.info(f"[TELEGRAM_BOT] Этап 3/7: Анализ чанков через LLM")
+        analysis_response = await analyze(chunks, user_query)
+        analysis_time = time.perf_counter() - analysis_start_time
+        logger.info(
+            f"[TELEGRAM_BOT] ✅ Анализ завершён, статус: {analysis_response.status} "
+            f"(время анализа: {analysis_time:.3f}с)"
+        )
+
+        # 4. Форматирование ответа
+        formatting_start_time = time.perf_counter()
+        logger.info(f"[TELEGRAM_BOT] Этап 4/7: Форматирование ответа")
+        response_text = format_response(analysis_response, used_categories=filter_categories)
+        formatting_time = time.perf_counter() - formatting_start_time
+        logger.debug(
+            f"[TELEGRAM_BOT] Сформирован ответ длиной {len(response_text)} символов "
+            f"(время форматирования: {formatting_time:.3f}с)"
+        )
+
+        # 5. Сохранение в кэш
+        cache_save_start_time = time.perf_counter()
+        logger.info(f"[TELEGRAM_BOT] Этап 5/7: Сохранение в кэш")
+        await _set_to_cache(cache_key, response_text)
+        cache_save_time = time.perf_counter() - cache_save_start_time
+
+        # 6. Сохранение контекста запроса для кнопки изменения категорий
+        query_hash = save_query_context(user_id, user_query, filter_categories)
+        keyboard = create_response_keyboard(query_hash)
+
+        # 7. Отправка ответа
+        send_start_time = time.perf_counter()
+        logger.info(f"[TELEGRAM_BOT] Этап 6/7: Отправка ответа пользователю")
+        try:
+            await processing_message.edit_text(
+                response_text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            # Если ошибка парсинга Markdown, отправляем без форматирования
+            error_type = type(e).__name__
+            logger.warning(
+                f"[TELEGRAM_BOT] ⚠️ Ошибка при отправке с Markdown (тип: {error_type}): {e}. "
+                f"Отправляем без форматирования. Длина ответа: {len(response_text)} символов"
+            )
+            try:
+                # Убираем Markdown разметку для fallback
+                fallback_text = response_text.replace("**", "").replace("_", "").replace("`", "")
+                await processing_message.edit_text(
+                    fallback_text,
+                    reply_markup=keyboard
+                )
+                logger.info("[TELEGRAM_BOT] ✅ Ответ успешно отправлен без форматирования")
+            except Exception as fallback_error:
+                logger.error(
+                    f"[TELEGRAM_BOT] ❌ Не удалось отправить ответ даже без форматирования: {fallback_error}. "
+                    f"Проблема может быть в длине сообщения ({len(response_text)} символов) или специальных символах."
+                )
+                # Пробуем отправить урезанную версию
+                try:
+                    truncated_text = response_text[:4000] + "\n\n... (сообщение обрезано из-за ограничений Telegram)"
+                    await processing_message.edit_text(
+                        truncated_text,
+                        reply_markup=keyboard
+                    )
+                except Exception as final_error:
+                    logger.error(f"[TELEGRAM_BOT] ❌ Критическая ошибка: не удалось отправить ответ: {final_error}")
+                    await processing_message.edit_text(
+                        "❌ Произошла ошибка при отправке ответа. Ответ слишком длинный или содержит недопустимые символы."
+                    )
+        
+        send_time = time.perf_counter() - send_start_time
+        total_time = time.perf_counter() - total_start_time
+        
+        logger.info(
+            f"[TELEGRAM_BOT] ✅ Ответ успешно отправлен пользователю {user_id} "
+            f"(время отправки: {send_time:.3f}с, общее время: {total_time:.3f}с)"
+        )
+        logger.info(
+            f"[TELEGRAM_BOT] 📊 Производительность: "
+            f"поиск={retrieval_time:.3f}с, "
+            f"анализ={analysis_time:.3f}с, "
+            f"форматирование={formatting_time:.3f}с, "
+            f"кэш={cache_save_time:.3f}с, "
+            f"отправка={send_time:.3f}с, "
+            f"всего={total_time:.3f}с"
+        )
+
+    except Exception as e:
+        total_time = time.perf_counter() - total_start_time if 'total_start_time' in locals() else 0
+        error_type = type(e).__name__
+        error_details = str(e)
+        
+        logger.error(
+            f"[TELEGRAM_BOT] ❌ Критическая ошибка при обработке запроса: "
+            f"тип={error_type}, сообщение={error_details}, "
+            f"запрос='{user_query[:100]}...', пользователь={user_id}, "
+            f"время до ошибки={total_time:.3f}с",
+            exc_info=True
+        )
+        
+        # Более информативное сообщение об ошибке для пользователя
+        error_message = (
+            "❌ Произошла ошибка при обработке вашего запроса.\n\n"
+            "Пожалуйста, попробуйте:\n"
+            "• Переформулировать вопрос\n"
+            "• Попробовать позже\n"
+            "• Проверить, что вопрос не слишком длинный"
+        )
+        
+        try:
+            await processing_message.edit_text(error_message)
+        except Exception as send_error:
+            logger.error(
+                f"[TELEGRAM_BOT] ❌ Не удалось отправить сообщение об ошибке: {send_error}"
+            )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений от пользователей.
 
@@ -172,204 +401,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Показываем, что бот обрабатывает запрос
-    processing_message = await update.message.reply_text("🔍 Ищу информацию...")
-
-    # Общий таймер обработки запроса
-    total_start_time = time.perf_counter()
-
-    try:
-        # 1. Проверка кэша
-        cache_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 1/6: Проверка кэша")
-        cache_key = f"query:{user_query.lower()}"
-        cached_response = await _get_from_cache(cache_key)
-        cache_time = time.perf_counter() - cache_start_time
-
-        if cached_response:
-            total_time = time.perf_counter() - total_start_time
-            logger.info(
-                f"[TELEGRAM_BOT] ✅ Ответ найден в кэше для запроса: {user_query[:50]}... "
-                f"(время проверки кэша: {cache_time:.3f}с, общее время: {total_time:.3f}с)"
-            )
-            await processing_message.edit_text(cached_response, parse_mode="Markdown")
-            return
+    # Проверяем, есть ли у пользователя сохраненные категории
+    user_categories = get_user_categories(user.id)
+    
+    # Если у пользователя нет сохраненных категорий, показываем клавиатуру выбора
+    if not has_user_selected_categories(user.id):
         logger.info(
-            f"[TELEGRAM_BOT] Кэш не содержит ответа, продолжаем обработку "
-            f"(время проверки кэша: {cache_time:.3f}с)"
+            f"[TELEGRAM_BOT] У пользователя {user.id} нет сохраненных категорий, "
+            f"показываем клавиатуру выбора категорий"
         )
-
-        # 2. Определение категорий для поиска
-        categories_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 2/7: Определение категорий для поиска")
-        
-        # Проверяем, выбрал ли пользователь категории
-        user_categories = get_user_categories(user.id)
-        
-        if has_user_selected_categories(user.id):
-            # Используем выбранные пользователем категории
-            filter_categories = user_categories
-            logger.info(
-                f"[TELEGRAM_BOT] Используются выбранные пользователем категории: {filter_categories}"
-            )
-        else:
-            # Автоматически определяем категории через LLM
-            from src.category_classifier import classify_query_category
-            
-            filter_categories = await classify_query_category(user_query)
-            if filter_categories:
-                logger.info(
-                    f"[TELEGRAM_BOT] LLM определил категории для запроса: {filter_categories}"
-                )
-            else:
-                logger.info(
-                    f"[TELEGRAM_BOT] LLM не определил категории, поиск по всем категориям"
-                )
-                filter_categories = None
-        
-        categories_time = time.perf_counter() - categories_start_time
-        logger.debug(f"[TELEGRAM_BOT] Определение категорий завершено за {categories_time:.3f}с")
-        
-        # 3. Поиск релевантных чанков
-        retrieval_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 3/7: Поиск релевантных чанков")
-        chunks = await retrieve_chunks(user_query, filter_categories=filter_categories)
-        retrieval_time = time.perf_counter() - retrieval_start_time
-
-        if chunks == NOT_FOUND:
-            total_time = time.perf_counter() - total_start_time
-            logger.warning(
-                f"[TELEGRAM_BOT] ❌ Не найдено релевантных чанков для запроса: {user_query[:50]}... "
-                f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
-            )
-            response_text = format_response(
-                AnalysisResponse(status="NOT_FOUND", clarification_question=None, result=None)
-            )
-            await processing_message.edit_text(response_text, parse_mode="Markdown")
-            return
-        
-        if isinstance(chunks, list):
-            logger.info(
-                f"[TELEGRAM_BOT] ✅ Найдено {len(chunks)} релевантных чанков "
-                f"(время поиска: {retrieval_time:.3f}с)"
-            )
-            for i, chunk in enumerate(chunks):
-                logger.debug(f"[TELEGRAM_BOT] Чанк {i+1}: source={chunk.get('source')}, score={chunk.get('score')}, text_length={len(chunk.get('text', ''))}")
-        else:
-            total_time = time.perf_counter() - total_start_time
-            logger.error(
-                f"[TELEGRAM_BOT] ❌ Неожиданный тип chunks: {type(chunks)} "
-                f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
-            )
-            response_text = format_response(
-                AnalysisResponse(status="NOT_FOUND", clarification_question=None, result=None)
-            )
-            await processing_message.edit_text(response_text, parse_mode="Markdown")
-            return
-
-        # 4. Анализ чанков
-        analysis_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 4/7: Анализ чанков через LLM")
-        analysis_response = await analyze(chunks, user_query)
-        analysis_time = time.perf_counter() - analysis_start_time
-        logger.info(
-            f"[TELEGRAM_BOT] ✅ Анализ завершён, статус: {analysis_response.status} "
-            f"(время анализа: {analysis_time:.3f}с)"
+        # Сохраняем контекст запроса
+        query_hash = save_query_context(user.id, user_query, None)
+        # Показываем клавиатуру выбора категорий
+        keyboard = create_query_categories_keyboard(query_hash)
+        await update.message.reply_text(
+            "🔍 Выберите категории для поиска или используйте автоопределение:",
+            reply_markup=keyboard
         )
+        return
 
-        # 5. Форматирование ответа
-        formatting_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 5/7: Форматирование ответа")
-        response_text = format_response(analysis_response)
-        formatting_time = time.perf_counter() - formatting_start_time
-        logger.debug(
-            f"[TELEGRAM_BOT] Сформирован ответ длиной {len(response_text)} символов "
-            f"(время форматирования: {formatting_time:.3f}с)"
-        )
-
-        # 6. Сохранение в кэш
-        cache_save_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 6/7: Сохранение в кэш")
-        await _set_to_cache(cache_key, response_text)
-        cache_save_time = time.perf_counter() - cache_save_start_time
-
-        # 7. Отправка ответа
-        send_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 7/7: Отправка ответа пользователю")
-        try:
-            await processing_message.edit_text(response_text, parse_mode="Markdown")
-        except Exception as e:
-            # Если ошибка парсинга Markdown, отправляем без форматирования
-            error_type = type(e).__name__
-            logger.warning(
-                f"[TELEGRAM_BOT] ⚠️ Ошибка при отправке с Markdown (тип: {error_type}): {e}. "
-                f"Отправляем без форматирования. Длина ответа: {len(response_text)} символов"
-            )
-            try:
-                # Убираем Markdown разметку для fallback
-                fallback_text = response_text.replace("**", "").replace("_", "").replace("`", "")
-                await processing_message.edit_text(fallback_text)
-                logger.info("[TELEGRAM_BOT] ✅ Ответ успешно отправлен без форматирования")
-            except Exception as fallback_error:
-                logger.error(
-                    f"[TELEGRAM_BOT] ❌ Не удалось отправить ответ даже без форматирования: {fallback_error}. "
-                    f"Проблема может быть в длине сообщения ({len(response_text)} символов) или специальных символах."
-                )
-                # Пробуем отправить урезанную версию
-                try:
-                    truncated_text = response_text[:4000] + "\n\n... (сообщение обрезано из-за ограничений Telegram)"
-                    await processing_message.edit_text(truncated_text)
-                except Exception as final_error:
-                    logger.error(f"[TELEGRAM_BOT] ❌ Критическая ошибка: не удалось отправить ответ: {final_error}")
-                    await processing_message.edit_text(
-                        "❌ Произошла ошибка при отправке ответа. Ответ слишком длинный или содержит недопустимые символы."
-                    )
-        
-        send_time = time.perf_counter() - send_start_time
-        total_time = time.perf_counter() - total_start_time
-        
-        logger.info(
-            f"[TELEGRAM_BOT] ✅ Ответ успешно отправлен пользователю {user.id} "
-            f"(время отправки: {send_time:.3f}с, общее время: {total_time:.3f}с)"
-        )
-        logger.info(
-            f"[TELEGRAM_BOT] 📊 Производительность: "
-            f"поиск={retrieval_time:.3f}с, "
-            f"анализ={analysis_time:.3f}с, "
-            f"форматирование={formatting_time:.3f}с, "
-            f"кэш={cache_save_time:.3f}с, "
-            f"отправка={send_time:.3f}с, "
-            f"всего={total_time:.3f}с"
-        )
-
-    except Exception as e:
-        total_time = time.perf_counter() - total_start_time if 'total_start_time' in locals() else 0
-        error_type = type(e).__name__
-        error_details = str(e)
-        
-        logger.error(
-            f"[TELEGRAM_BOT] ❌ Критическая ошибка при обработке запроса: "
-            f"тип={error_type}, сообщение={error_details}, "
-            f"запрос='{user_query[:100]}...', пользователь={user.id}, "
-            f"время до ошибки={total_time:.3f}с",
-            exc_info=True
-        )
-        
-        # Более информативное сообщение об ошибке для пользователя
-        error_message = (
-            "❌ Произошла ошибка при обработке вашего запроса.\n\n"
-            "Пожалуйста, попробуйте:\n"
-            "• Переформулировать вопрос\n"
-            "• Попробовать позже\n"
-            "• Проверить, что вопрос не слишком длинный"
-        )
-        
-        try:
-            await processing_message.edit_text(error_message)
-        except Exception as send_error:
-            logger.error(
-                f"[TELEGRAM_BOT] ❌ Не удалось отправить сообщение об ошибке: {send_error}"
-            )
+    # Если есть сохраненные категории, используем их сразу
+    await _process_query_with_categories(
+        update, context, user_query, user_categories, user.id
+    )
 
 
 async def handle_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -538,6 +592,229 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
             await query.answer("❌ Произошла ошибка при обработке запроса", show_alert=True)
         except Exception as e2:
             logger.error(f"[TELEGRAM_BOT] [CALLBACK] ❌ Не удалось отправить ответ об ошибке: {e2}")
+
+
+async def handle_query_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик выбора категорий при запросе.
+    
+    Обрабатывает callback'и:
+    - query_cat:query_hash:category - выбор категории
+    - query_auto:query_hash - автоопределение категорий
+    - query_all:query_hash - все категории
+    
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    query = update.callback_query
+    user = update.effective_user
+    
+    if not query or not user:
+        return
+    
+    await query.answer()
+    
+    callback_data = query.data
+    logger.info(f"[TELEGRAM_BOT] [QUERY_CAT] Получен callback: {callback_data} от пользователя {user.id}")
+    
+    try:
+        if callback_data.startswith("query_cat:"):
+            # Выбор одной категории: query_cat:query_hash:category
+            parts = callback_data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer("❌ Ошибка: неверный формат", show_alert=True)
+                return
+            
+            _, query_hash, category = parts
+            
+            # Получаем контекст запроса
+            query_context = get_query_context(query_hash)
+            if not query_context:
+                await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+                if query.message:
+                    await query.message.edit_text("❌ Запрос устарел. Пожалуйста, задайте вопрос заново.")
+                return
+            
+            # Проверяем, что это запрос от того же пользователя
+            if query_context["user_id"] != user.id:
+                await query.answer("❌ Это не ваш запрос", show_alert=True)
+                return
+            
+            # Используем выбранную категорию
+            filter_categories = [category]
+            user_query = query_context["query_text"]
+            
+            # Обновляем сообщение
+            if query.message:
+                await query.message.edit_text("🔍 Ищу информацию...")
+            
+            # Обрабатываем запрос с выбранной категорией
+            await _process_query_with_categories(
+                update, context, user_query, filter_categories, user.id, query.message
+            )
+            
+        elif callback_data.startswith("query_auto:"):
+            # Автоопределение категорий: query_auto:query_hash
+            parts = callback_data.split(":", 1)
+            if len(parts) != 2:
+                await query.answer("❌ Ошибка: неверный формат", show_alert=True)
+                return
+            
+            _, query_hash = parts
+            
+            # Получаем контекст запроса
+            query_context = get_query_context(query_hash)
+            if not query_context:
+                await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+                if query.message:
+                    await query.message.edit_text("❌ Запрос устарел. Пожалуйста, задайте вопрос заново.")
+                return
+            
+            # Проверяем, что это запрос от того же пользователя
+            if query_context["user_id"] != user.id:
+                await query.answer("❌ Это не ваш запрос", show_alert=True)
+                return
+            
+            user_query = query_context["query_text"]
+            
+            # Автоматически определяем категории через LLM
+            from src.category_classifier import classify_query_category
+            
+            # Обновляем сообщение
+            if query.message:
+                await query.message.edit_text("🤖 Определяю категории...")
+            
+            filter_categories = await classify_query_category(user_query)
+            if not filter_categories:
+                filter_categories = None
+            
+            logger.info(
+                f"[TELEGRAM_BOT] [QUERY_CAT] LLM определил категории: {filter_categories}"
+            )
+            
+            # Обрабатываем запрос с определенными категориями
+            if query.message:
+                await query.message.edit_text("🔍 Ищу информацию...")
+            
+            await _process_query_with_categories(
+                update, context, user_query, filter_categories, user.id, query.message
+            )
+            
+        elif callback_data.startswith("query_all:"):
+            # Все категории: query_all:query_hash
+            parts = callback_data.split(":", 1)
+            if len(parts) != 2:
+                await query.answer("❌ Ошибка: неверный формат", show_alert=True)
+                return
+            
+            _, query_hash = parts
+            
+            # Получаем контекст запроса
+            query_context = get_query_context(query_hash)
+            if not query_context:
+                await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+                if query.message:
+                    await query.message.edit_text("❌ Запрос устарел. Пожалуйста, задайте вопрос заново.")
+                return
+            
+            # Проверяем, что это запрос от того же пользователя
+            if query_context["user_id"] != user.id:
+                await query.answer("❌ Это не ваш запрос", show_alert=True)
+                return
+            
+            user_query = query_context["query_text"]
+            filter_categories = None  # Все категории
+            
+            # Обновляем сообщение
+            if query.message:
+                await query.message.edit_text("🔍 Ищу информацию...")
+            
+            # Обрабатываем запрос со всеми категориями
+            await _process_query_with_categories(
+                update, context, user_query, filter_categories, user.id, query.message
+            )
+            
+    except Exception as e:
+        logger.error(
+            f"[TELEGRAM_BOT] [QUERY_CAT] ❌ Ошибка при обработке callback: {e}",
+            exc_info=True
+        )
+        try:
+            await query.answer("❌ Произошла ошибка", show_alert=True)
+            if query.message:
+                await query.message.edit_text("❌ Произошла ошибка при обработке запроса. Попробуйте задать вопрос заново.")
+        except Exception as e2:
+            logger.error(f"[TELEGRAM_BOT] [QUERY_CAT] ❌ Не удалось отправить ответ об ошибке: {e2}")
+
+
+async def handle_change_categories_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик изменения категорий из ответа.
+    
+    Обрабатывает callback: change_cats:query_hash
+    
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    query = update.callback_query
+    user = update.effective_user
+    
+    if not query or not user:
+        return
+    
+    await query.answer()
+    
+    callback_data = query.data
+    logger.info(f"[TELEGRAM_BOT] [CHANGE_CATS] Получен callback: {callback_data} от пользователя {user.id}")
+    
+    try:
+        if callback_data.startswith("change_cats:"):
+            # Изменение категорий: change_cats:query_hash
+            parts = callback_data.split(":", 1)
+            if len(parts) != 2:
+                await query.answer("❌ Ошибка: неверный формат", show_alert=True)
+                return
+            
+            _, query_hash = parts
+            
+            # Получаем контекст запроса
+            query_context = get_query_context(query_hash)
+            if not query_context:
+                await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+                if query.message:
+                    await query.message.edit_text("❌ Запрос устарел. Пожалуйста, задайте вопрос заново.")
+                return
+            
+            # Проверяем, что это запрос от того же пользователя
+            if query_context["user_id"] != user.id:
+                await query.answer("❌ Это не ваш запрос", show_alert=True)
+                return
+            
+            # Показываем клавиатуру выбора категорий
+            current_categories = query_context.get("used_categories", [])
+            keyboard = create_query_categories_keyboard(query_hash)
+            
+            message_text = "🔍 Выберите категории для поиска или используйте автоопределение:"
+            if current_categories:
+                categories_str = ", ".join(current_categories)
+                message_text += f"\n\nТекущие категории: {categories_str}"
+            
+            if query.message:
+                await query.message.edit_text(message_text, reply_markup=keyboard)
+                logger.info(
+                    f"[TELEGRAM_BOT] [CHANGE_CATS] Показана клавиатура выбора категорий "
+                    f"для запроса {query_hash}"
+                )
+            
+    except Exception as e:
+        logger.error(
+            f"[TELEGRAM_BOT] [CHANGE_CATS] ❌ Ошибка при обработке callback: {e}",
+            exc_info=True
+        )
+        try:
+            await query.answer("❌ Произошла ошибка", show_alert=True)
+        except Exception as e2:
+            logger.error(f"[TELEGRAM_BOT] [CHANGE_CATS] ❌ Не удалось отправить ответ об ошибке: {e2}")
 
 
 async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1073,6 +1350,22 @@ def create_bot_application() -> Application:
             pattern=r"^(toggle_cat:|select_all_cats|clear_cats)"
         )
     )
+    
+    # Регистрация обработчиков callback для выбора категорий при запросе
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_query_category_callback,
+            pattern=r"^query_(cat|auto|all):"
+        )
+    )
+    
+    # Регистрация обработчиков callback для изменения категорий из ответа
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_change_categories_callback,
+            pattern=r"^change_cats:"
+        )
+    )
 
     logger.info(
         "Обработчики зарегистрированы: /start, /help, /categories, /pending, /cleanup, текстовые сообщения, "
@@ -1210,6 +1503,11 @@ async def run_bot() -> None:
         if application.bot:
             startup_context = StartupContext(application.bot)
             await send_pending_notifications_on_startup(startup_context)
+        
+        # Очищаем истекшие контексты запросов при старте
+        expired_count = cleanup_expired_contexts()
+        if expired_count > 0:
+            logger.info(f"[STARTUP] Очищено {expired_count} истекших контекстов запросов")
 
     # Ожидание сигнала остановки
     try:

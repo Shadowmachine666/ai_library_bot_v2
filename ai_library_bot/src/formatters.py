@@ -38,11 +38,15 @@ def escape_markdown(text: str) -> str:
     return text
 
 
-def format_response(response: AnalysisResponse) -> str:
+def format_response(
+    response: AnalysisResponse,
+    used_categories: list[str] | None = None,
+) -> str:
     """Форматирует ответ анализатора в Markdown текст.
 
     Args:
         response: Объект AnalysisResponse от анализатора.
+        used_categories: Категории, использованные для поиска (None = все категории).
 
     Returns:
         Отформатированный текст в Markdown для отправки пользователю.
@@ -57,7 +61,7 @@ def format_response(response: AnalysisResponse) -> str:
         return format_conflict(response)
 
     if response.status == "SUCCESS" and response.result:
-        return format_success(response.result)
+        return format_success(response.result, used_categories=used_categories)
 
     # Fallback для неизвестного статуса
     logger.warning(f"Неизвестный статус ответа: {response.status}")
@@ -120,11 +124,12 @@ def format_conflict(response: AnalysisResponse) -> str:
 который вас интересует."""
 
 
-def format_success(result: Result) -> str:
+def format_success(result: Result, used_categories: list[str] | None = None) -> str:
     """Форматирует успешный ответ с результатом анализа.
 
     Args:
         result: Объект Result с ответом и цитатами.
+        used_categories: Категории, использованные для поиска (None = все категории).
 
     Returns:
         Markdown текст сообщения.
@@ -144,6 +149,14 @@ def format_success(result: Result) -> str:
             escaped_source = escape_markdown(quote.source)
             lines.append(f"{i}\\. _{escaped_text}_")
             lines.append(f"   📖 {escaped_source}\n")
+
+    # Добавляем информацию о категориях поиска
+    if used_categories:
+        categories_str = ", ".join(used_categories)
+        escaped_categories = escape_markdown(categories_str)
+        lines.append(f"\n🔍 _Поиск выполнен по категориям: {escaped_categories}_\n")
+    else:
+        lines.append("\n🔍 _Поиск выполнен по всем категориям_\n")
 
     # Добавляем дисклеймер
     if result.disclaimer:
@@ -233,6 +246,66 @@ def create_categories_keyboard(selected_categories: list[str] | None = None) -> 
     keyboard_buttons.append([
         InlineKeyboardButton("✅ Все категории", callback_data="select_all_cats"),
         InlineKeyboardButton("❌ Сбросить", callback_data="clear_cats")
+    ])
+    
+    return InlineKeyboardMarkup(keyboard_buttons)
+
+
+def create_response_keyboard(query_hash: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру для ответа с кнопкой изменения категорий.
+    
+    Args:
+        query_hash: Хеш запроса для идентификации при изменении категорий.
+    
+    Returns:
+        Объект InlineKeyboardMarkup с кнопкой изменения категорий.
+    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔄 Изменить категории",
+                callback_data=f"change_cats:{query_hash}"
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def create_query_categories_keyboard(query_hash: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру для выбора категорий при запросе.
+    
+    Показывает все категории + кнопку "Автоопределение" для автоматического
+    определения категорий через LLM.
+    
+    Args:
+        query_hash: Хеш запроса для идентификации.
+    
+    Returns:
+        Объект InlineKeyboardMarkup с кнопками категорий и автоопределения.
+    """
+    keyboard_buttons = []
+    
+    # Создаем кнопки для каждой категории
+    for category in Config.CATEGORIES:
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                category,
+                callback_data=f"query_cat:{query_hash}:{category}"
+            )
+        ])
+    
+    # Кнопки управления
+    keyboard_buttons.append([
+        InlineKeyboardButton(
+            "🤖 Автоопределение",
+            callback_data=f"query_auto:{query_hash}"
+        )
+    ])
+    keyboard_buttons.append([
+        InlineKeyboardButton(
+            "✅ Все категории",
+            callback_data=f"query_all:{query_hash}"
+        )
     ])
     
     return InlineKeyboardMarkup(keyboard_buttons)
