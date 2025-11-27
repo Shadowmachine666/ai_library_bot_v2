@@ -39,6 +39,7 @@ def save_query_context(
     user_id: int,
     query_text: str,
     used_categories: list[str] | None,
+    selected_categories: list[str] | None = None,
 ) -> str:
     """Сохраняет контекст запроса пользователя.
     
@@ -46,6 +47,7 @@ def save_query_context(
         user_id: ID пользователя Telegram.
         query_text: Текст запроса.
         used_categories: Категории, использованные для поиска (None = все категории).
+        selected_categories: Выбранные пользователем категории для множественного выбора (None = не выбраны).
     
     Returns:
         Хеш запроса для использования в callback'ах.
@@ -56,12 +58,13 @@ def save_query_context(
         "user_id": user_id,
         "query_text": query_text,
         "used_categories": used_categories,
+        "selected_categories": selected_categories if selected_categories is not None else [],
         "timestamp": time.time(),
     }
     
     logger.debug(
         f"Сохранен контекст запроса: hash={query_hash}, "
-        f"user_id={user_id}, categories={used_categories}"
+        f"user_id={user_id}, categories={used_categories}, selected={selected_categories}"
     )
     
     return query_hash
@@ -92,8 +95,34 @@ def get_query_context(query_hash: str) -> dict[str, Any] | None:
         del _query_contexts[query_hash]
         return None
     
+    # Обратная совместимость: если selected_categories отсутствует, инициализируем пустым списком
+    if "selected_categories" not in context:
+        context["selected_categories"] = []
+        logger.debug(f"Инициализированы selected_categories для старого контекста: hash={query_hash}")
+    
     logger.debug(f"Загружен контекст запроса: hash={query_hash}")
     return context
+
+
+def update_query_selected_categories(query_hash: str, selected_categories: list[str]) -> bool:
+    """Обновляет выбранные категории в контексте запроса.
+    
+    Args:
+        query_hash: Хеш запроса.
+        selected_categories: Список выбранных категорий.
+    
+    Returns:
+        True если контекст был обновлен, False если не найден.
+    """
+    if query_hash not in _query_contexts:
+        logger.warning(f"Попытка обновить несуществующий контекст запроса: hash={query_hash}")
+        return False
+    
+    _query_contexts[query_hash]["selected_categories"] = selected_categories
+    logger.debug(
+        f"Обновлены выбранные категории для запроса {query_hash}: {selected_categories}"
+    )
+    return True
 
 
 def delete_query_context(query_hash: str) -> bool:

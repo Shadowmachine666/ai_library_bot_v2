@@ -271,30 +271,47 @@ def create_response_keyboard(query_hash: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def create_query_categories_keyboard(query_hash: str) -> InlineKeyboardMarkup:
+def create_query_categories_keyboard(
+    query_hash: str, selected_categories: list[str] | None = None
+) -> InlineKeyboardMarkup:
     """Создает клавиатуру для выбора категорий при запросе.
     
-    Показывает все категории + кнопку "Автоопределение" для автоматического
-    определения категорий через LLM.
+    Показывает все категории с индикацией выбранных + кнопки управления.
     
     Args:
         query_hash: Хеш запроса для идентификации.
+        selected_categories: Список выбранных категорий (для показа галочек).
     
     Returns:
-        Объект InlineKeyboardMarkup с кнопками категорий и автоопределения.
+        Объект InlineKeyboardMarkup с кнопками категорий и управления.
     """
+    if selected_categories is None:
+        selected_categories = []
+    
     keyboard_buttons = []
     
-    # Создаем кнопки для каждой категории
+    # Создаем кнопки для каждой категории с индикацией выбора
     for category in Config.CATEGORIES:
+        # Показываем галочку для выбранных категорий
+        display_text = f"✅ {category}" if category in selected_categories else category
         keyboard_buttons.append([
             InlineKeyboardButton(
-                category,
+                display_text,
                 callback_data=f"query_cat:{query_hash}:{category}"
             )
         ])
     
     # Кнопки управления
+    keyboard_buttons.append([
+        InlineKeyboardButton(
+            "🔍 Начать поиск",
+            callback_data=f"query_search:{query_hash}"
+        ),
+        InlineKeyboardButton(
+            "❌ Сбросить",
+            callback_data=f"query_reset:{query_hash}"
+        )
+    ])
     keyboard_buttons.append([
         InlineKeyboardButton(
             "🤖 Автоопределение",

@@ -456,11 +456,14 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
                 f"[RETRIEVER] ✅ После фильтрации по категориям: {len(results)} результатов"
             )
         else:
+            # Если все результаты отфильтрованы, возвращаем NOT_FOUND
+            # Это означает, что в выбранных категориях нет информации
             logger.warning(
                 f"[RETRIEVER] ⚠️ Все результаты отфильтрованы по категориям. "
-                f"Продолжаем без фильтрации по категориям. "
+                f"В выбранных категориях ({filter_categories}) не найдено информации. "
                 f"(Было {len(results)} результатов до фильтрации)"
             )
+            return NOT_FOUND
     else:
         logger.debug("[RETRIEVER] Фильтрация по категориям не применяется")
 

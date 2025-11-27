@@ -65,6 +65,7 @@ from src.query_context import (
     delete_query_context,
     get_query_context,
     save_query_context,
+    update_query_selected_categories,
 )
 from src.user_categories import (
     clear_user_categories,
@@ -223,15 +224,38 @@ async def _process_query_with_categories(
 
         if chunks == NOT_FOUND:
             total_time = time.perf_counter() - total_start_time
-            logger.warning(
-                f"[TELEGRAM_BOT] ❌ Не найдено релевантных чанков для запроса: {user_query[:50]}... "
-                f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
-            )
-            response_text = format_response(
-                AnalysisResponse(status="NOT_FOUND", clarification_question=None, result=None),
-                used_categories=filter_categories
-            )
-            # Сохраняем контекст запроса
+            
+            # Проверяем, была ли применена фильтрация по категориям
+            if filter_categories:
+                logger.warning(
+                    f"[TELEGRAM_BOT] ❌ Не найдено релевантных чанков в выбранных категориях "
+                    f"({filter_categories}) для запроса: {user_query[:50]}... "
+                    f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
+                )
+                # Формируем информативное сообщение о том, что в выбранных категориях нет информации
+                from src.formatters import escape_markdown
+                categories_str = ", ".join(filter_categories)
+                categories_escaped = escape_markdown(categories_str)
+                response_text = (
+                    f"❌ *Информация не найдена*\n\n"
+                    f"В выбранных категориях \\({categories_escaped}\\) не найдено информации "
+                    f"по вашему запросу\\.\n\n"
+                    f"*Попробуйте:*\n"
+                    f"• Выбрать другие категории\n"
+                    f"• Использовать 'Все категории'\n"
+                    f"• Переформулировать вопрос"
+                )
+            else:
+                logger.warning(
+                    f"[TELEGRAM_BOT] ❌ Не найдено релевантных чанков для запроса: {user_query[:50]}... "
+                    f"(время поиска: {retrieval_time:.3f}с, общее время: {total_time:.3f}с)"
+                )
+                response_text = format_response(
+                    AnalysisResponse(status="NOT_FOUND", clarification_question=None, result=None),
+                    used_categories=filter_categories
+                )
+            
+            # Сохраняем контекст запроса для возможности изменения категорий
             query_hash = save_query_context(user_id, user_query, filter_categories)
             keyboard = create_response_keyboard(query_hash)
             await processing_message.edit_text(
@@ -423,11 +447,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"показываем клавиатуру выбора категорий"
         )
         # Сохраняем контекст запроса
-        query_hash = save_query_context(user.id, user_query, None)
+        query_hash = save_query_context(user.id, user_query, None, selected_categories=[])
         # Показываем клавиатуру выбора категорий
-        keyboard = create_query_categories_keyboard(query_hash)
+        keyboard = create_query_categories_keyboard(query_hash, selected_categories=[])
         await update.message.reply_text(
-            "🔍 Выберите категории для поиска или используйте автоопределение:",
+            "🔍 Выберите категории для поиска (можно несколько):\n\n"
+            "Нажмите на категорию, чтобы выбрать/снять выбор.\n"
+            "Когда будете готовы, нажмите '🔍 Начать поиск'.\n\n"
+            "Или используйте '🤖 Автоопределение' для автоматического выбора.",
             reply_markup=keyboard
         )
         return
@@ -631,7 +658,7 @@ async def handle_query_category_callback(update: Update, context: ContextTypes.D
     
     try:
         if callback_data.startswith("query_cat:"):
-            # Выбор одной категории: query_cat:query_hash:category
+            # Toggle категории: query_cat:query_hash:category
             parts = callback_data.split(":", 2)
             if len(parts) != 3:
                 await query.answer("❌ Ошибка: неверный формат", show_alert=True)
@@ -652,18 +679,126 @@ async def handle_query_category_callback(update: Update, context: ContextTypes.D
                 await query.answer("❌ Это не ваш запрос", show_alert=True)
                 return
             
-            # Используем выбранную категорию
-            filter_categories = [category]
+            # Получаем текущий список выбранных категорий
+            selected_categories = query_context.get("selected_categories", [])
+            
+            # Toggle категории (добавить/удалить)
+            if category in selected_categories:
+                selected_categories = [cat for cat in selected_categories if cat != category]
+            else:
+                selected_categories = selected_categories + [category]
+            
+            # Обновляем контекст запроса
+            update_query_selected_categories(query_hash, selected_categories)
+            
+            # Обновляем клавиатуру с новым состоянием
+            keyboard = create_query_categories_keyboard(query_hash, selected_categories)
+            
+            # Формируем сообщение с информацией о выбранных категориях
+            if selected_categories:
+                categories_str = ", ".join(selected_categories)
+                message_text = (
+                    f"🔍 Выберите категории для поиска (можно несколько):\n\n"
+                    f"✅ Выбрано: {categories_str}\n\n"
+                    f"Нажмите на категорию, чтобы выбрать/снять выбор.\n"
+                    f"Когда будете готовы, нажмите '🔍 Начать поиск'."
+                )
+            else:
+                message_text = (
+                    f"🔍 Выберите категории для поиска (можно несколько):\n\n"
+                    f"Нажмите на категорию, чтобы выбрать.\n"
+                    f"Когда будете готовы, нажмите '🔍 Начать поиск'.\n\n"
+                    f"Или используйте '🤖 Автоопределение' для автоматического выбора."
+                )
+            
+            # Обновляем сообщение с новой клавиатурой
+            if query.message:
+                await query.message.edit_text(message_text, reply_markup=keyboard)
+            
+            logger.info(
+                f"[TELEGRAM_BOT] [QUERY_CAT] Пользователь {user.id} изменил выбор категорий: {selected_categories}"
+            )
+            
+        elif callback_data.startswith("query_search:"):
+            # Запуск поиска с выбранными категориями: query_search:query_hash
+            parts = callback_data.split(":", 1)
+            if len(parts) != 2:
+                await query.answer("❌ Ошибка: неверный формат", show_alert=True)
+                return
+            
+            _, query_hash = parts
+            
+            # Получаем контекст запроса
+            query_context = get_query_context(query_hash)
+            if not query_context:
+                await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+                if query.message:
+                    await query.message.edit_text("❌ Запрос устарел. Пожалуйста, задайте вопрос заново.")
+                return
+            
+            # Проверяем, что это запрос от того же пользователя
+            if query_context["user_id"] != user.id:
+                await query.answer("❌ Это не ваш запрос", show_alert=True)
+                return
+            
+            # Получаем выбранные категории
+            selected_categories = query_context.get("selected_categories", [])
+            
+            if not selected_categories:
+                await query.answer("❌ Выберите хотя бы одну категорию", show_alert=True)
+                return
+            
             user_query = query_context["query_text"]
+            filter_categories = selected_categories
             
             # Обновляем сообщение
             if query.message:
                 await query.message.edit_text("🔍 Ищу информацию...")
             
-            # Обрабатываем запрос с выбранной категорией
+            # Обрабатываем запрос с выбранными категориями
             await _process_query_with_categories(
                 update, context, user_query, filter_categories, user.id, query.message
             )
+            
+        elif callback_data.startswith("query_reset:"):
+            # Сброс выбора категорий: query_reset:query_hash
+            parts = callback_data.split(":", 1)
+            if len(parts) != 2:
+                await query.answer("❌ Ошибка: неверный формат", show_alert=True)
+                return
+            
+            _, query_hash = parts
+            
+            # Получаем контекст запроса
+            query_context = get_query_context(query_hash)
+            if not query_context:
+                await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+                if query.message:
+                    await query.message.edit_text("❌ Запрос устарел. Пожалуйста, задайте вопрос заново.")
+                return
+            
+            # Проверяем, что это запрос от того же пользователя
+            if query_context["user_id"] != user.id:
+                await query.answer("❌ Это не ваш запрос", show_alert=True)
+                return
+            
+            # Сбрасываем выбор категорий
+            update_query_selected_categories(query_hash, [])
+            
+            # Обновляем клавиатуру
+            keyboard = create_query_categories_keyboard(query_hash, selected_categories=[])
+            message_text = (
+                f"🔍 Выберите категории для поиска (можно несколько):\n\n"
+                f"Выбор сброшен.\n\n"
+                f"Нажмите на категорию, чтобы выбрать.\n"
+                f"Когда будете готовы, нажмите '🔍 Начать поиск'.\n\n"
+                f"Или используйте '🤖 Автоопределение' для автоматического выбора."
+            )
+            
+            if query.message:
+                await query.message.edit_text(message_text, reply_markup=keyboard)
+            
+            logger.info(f"[TELEGRAM_BOT] [QUERY_CAT] Пользователь {user.id} сбросил выбор категорий")
             
         elif callback_data.startswith("query_auto:"):
             # Автоопределение категорий: query_auto:query_hash
@@ -1594,7 +1729,7 @@ def create_bot_application() -> Application:
     application.add_handler(
         CallbackQueryHandler(
             handle_query_category_callback,
-            pattern=r"^query_(cat|auto|all):"
+            pattern=r"^query_(cat|auto|all|search|reset):"
         )
     )
     
@@ -1603,6 +1738,14 @@ def create_bot_application() -> Application:
         CallbackQueryHandler(
             handle_change_categories_callback,
             pattern=r"^change_cats:"
+        )
+    )
+    
+    # Регистрация обработчиков callback для индексации книг
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_index_books_callback,
+            pattern=r"^index_books:"
         )
     )
 
