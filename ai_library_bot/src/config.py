@@ -55,7 +55,7 @@ class Config:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Настройки индексации
-    MAX_FILE_SIZE_MB: int = 20
+    MAX_FILE_SIZE_MB: int = 40
     MAX_PDF_PAGES: int = 1000  # Увеличено с 500 до 1000 для поддержки больших книг
     MIN_CHUNK_SIZE: int = 200
     CHUNK_SIZE: int = 1500
