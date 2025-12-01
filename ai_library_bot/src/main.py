@@ -3,6 +3,7 @@
 Поддерживает команды:
 - ingest: загрузка книг в индекс
 - run: запуск Telegram бота
+- rebuild-index: восстановление FAISS индекса из метаданных (если индекс поврежден)
 """
 
 import argparse
@@ -11,7 +12,7 @@ import sys
 from pathlib import Path
 
 from src.config import Config
-from src.ingest_service import ingest_books
+from src.ingest_service import ingest_books, _rebuild_index_from_metadata
 from src.telegram_bot import run_bot
 from src.utils import setup_logger
 
@@ -42,6 +43,12 @@ def main() -> None:
     # Команда run
     run_parser = subparsers.add_parser("run", help="Запустить Telegram бота")
 
+    # Команда rebuild-index
+    rebuild_parser = subparsers.add_parser(
+        "rebuild-index",
+        help="Восстановить FAISS индекс из метаданных (если индекс поврежден)"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -58,6 +65,15 @@ def main() -> None:
             asyncio.run(ingest_books(str(Path(args.folder)), force=args.force))
         elif args.command == "run":
             asyncio.run(run_bot())
+        elif args.command == "rebuild-index":
+            logger.info("🔄 Запуск восстановления индекса из метаданных...")
+            success, message = asyncio.run(_rebuild_index_from_metadata())
+            if success:
+                logger.info(f"✅ {message}")
+                sys.exit(0)
+            else:
+                logger.error(f"❌ {message}")
+                sys.exit(1)
         else:
             parser.print_help()
             sys.exit(1)

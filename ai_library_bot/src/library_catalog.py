@@ -416,3 +416,4 @@ async def update_library_catalog() -> None:
         logger.error(f"[CATALOG] ❌ Ошибка при обновлении каталога: {e}", exc_info=True)
         # Не прерываем выполнение - ошибка обновления каталога не должна останавливать индексацию
 
+

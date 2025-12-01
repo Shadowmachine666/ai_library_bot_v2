@@ -6,7 +6,7 @@
 
 import hashlib
 import pickle
-from datetime import datetime
+from datetime import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -347,8 +347,10 @@ async def _remove_file_from_index(file_path: Path, file_index: FileIndex) -> Non
         with open(metadata_path, "rb") as f:
             all_metadata = pickle.load(f)
     except Exception as e:
-        logger.error(f"Ошибка при загрузке индекса для удаления: {e}")
-        raise ValueError(f"Не удалось загрузить индекс для удаления: {e}") from e
+        logger.error(f"❌ Ошибка при загрузке индекса для удаления: {e}")
+        logger.error("Индекс поврежден, невозможно удалить файл из индекса")
+        logger.warning("Рекомендуется пересоздать индекс (удалить поврежденные файлы и переиндексировать все книги)")
+        raise ValueError(f"Не удалось загрузить индекс для удаления (индекс поврежден): {e}") from e
     
     logger.info(f"Загружен индекс: {old_index.ntotal} векторов, {len(all_metadata)} метаданных")
     
@@ -907,6 +909,91 @@ async def _create_embeddings_batch(texts: list[str]) -> list[list[float]]:
         raise ValueError(f"Не удалось создать эмбеддинги: {e}") from e
 
 
+async def _rebuild_index_from_metadata() -> tuple[bool, str]:
+    """Восстанавливает FAISS индекс из метаданных.
+    
+    Загружает все тексты чанков из index.metadata.pkl, пересоздаёт эмбеддинги
+    и восстанавливает FAISS индекс. Это намного быстрее, чем полная переиндексация.
+    
+    Returns:
+        Кортеж (успех, сообщение). Если успех True, индекс восстановлен.
+    """
+    import faiss
+    import numpy as np
+    
+    index_path = Config.FAISS_PATH
+    metadata_path = index_path.with_suffix(".metadata.pkl")
+    
+    # Проверяем наличие метаданных
+    if not metadata_path.exists():
+        return False, "Файл метаданных не найден, восстановление невозможно"
+    
+    try:
+        # Загружаем метаданные
+        logger.info("🔄 Попытка восстановления индекса из метаданных...")
+        with open(metadata_path, "rb") as f:
+            all_metadata = pickle.load(f)
+        
+        if not all_metadata:
+            return False, "Метаданные пусты, восстановление невозможно"
+        
+        # Извлекаем все тексты чанков
+        chunks_texts = []
+        valid_metadata = []
+        for meta in all_metadata:
+            chunk_text = meta.get("chunk_text", "")
+            if chunk_text and isinstance(chunk_text, str):
+                chunks_texts.append(chunk_text)
+                valid_metadata.append(meta)
+            else:
+                logger.warning(f"Пропущен чанк без текста: {meta.get('source', 'unknown')}")
+        
+        if not chunks_texts:
+            return False, "Не найдено валидных текстов чанков в метаданных"
+        
+        logger.info(f"✅ Загружено {len(chunks_texts)} чанков из метаданных для восстановления")
+        
+        # Пересоздаём эмбеддинги батчами
+        logger.info(f"🔄 Пересоздание эмбеддингов для {len(chunks_texts)} чанков...")
+        all_embeddings = []
+        batch_size = Config.EMBEDDING_BATCH_SIZE
+        total_batches = (len(chunks_texts) + batch_size - 1) // batch_size
+        
+        for i in range(0, len(chunks_texts), batch_size):
+            batch_num = (i // batch_size) + 1
+            batch = chunks_texts[i : i + batch_size]
+            logger.info(f"Обработка батча {batch_num}/{total_batches} ({len(batch)} чанков)")
+            batch_embeddings = await _create_embeddings_batch(batch)
+            all_embeddings.extend(batch_embeddings)
+        
+        if len(all_embeddings) != len(chunks_texts):
+            return False, f"Несоответствие количества эмбеддингов: ожидалось {len(chunks_texts)}, получено {len(all_embeddings)}"
+        
+        logger.info(f"✅ Создано {len(all_embeddings)} эмбеддингов")
+        
+        # Создаём новый FAISS индекс
+        embedding_dim = len(all_embeddings[0])
+        embeddings_array = np.array(all_embeddings, dtype=np.float32)
+        index = faiss.IndexFlatL2(embedding_dim)
+        index.add(embeddings_array)
+        
+        # Сохраняем восстановленный индекс
+        faiss.write_index(index, str(index_path))
+        logger.info(f"✅ Восстановленный индекс сохранён: {index_path} ({index.ntotal} векторов)")
+        
+        # Сохраняем только валидные метаданные, чтобы они соответствовали индексу
+        with open(metadata_path, "wb") as f:
+            pickle.dump(valid_metadata, f, protocol=4)
+        logger.info(f"✅ Метаданные обновлены: {len(valid_metadata)} записей")
+        
+        return True, f"Индекс успешно восстановлен из метаданных: {len(chunks_texts)} чанков, {index.ntotal} векторов"
+        
+    except Exception as e:
+        error_msg = f"Ошибка при восстановлении индекса: {e}"
+        logger.error(f"❌ {error_msg}")
+        return False, error_msg
+
+
 async def _save_to_faiss(
     embeddings: list[list[float]],
     chunks: list[str],
@@ -947,15 +1034,64 @@ async def _save_to_faiss(
 
     if index_path.exists():
         # Загружаем существующий индекс
-        index = faiss.read_index(str(index_path))
-        logger.info(f"Загружен существующий индекс с {index.ntotal} векторами")
-        
-        # Загружаем метаданные
-        if metadata_path.exists():
-            with open(metadata_path, "rb") as f:
-                all_metadata = pickle.load(f)
-        else:
-            all_metadata = []
+        try:
+            index = faiss.read_index(str(index_path))
+            logger.info(f"Загружен существующий индекс с {index.ntotal} векторами")
+            
+            # Загружаем метаданные
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "rb") as f:
+                        all_metadata = pickle.load(f)
+                except Exception as e:
+                    logger.error(f"Ошибка при загрузке метаданных: {e}")
+                    logger.warning("Создаём новый индекс, так как метаданные повреждены")
+                    index = faiss.IndexFlatL2(embedding_dim)
+                    all_metadata = []
+            else:
+                all_metadata = []
+        except Exception as e:
+            # Индекс поврежден, пытаемся восстановить из метаданных
+            logger.error(f"❌ Ошибка при загрузке FAISS индекса: {e}")
+            logger.warning("⚠️ Индекс поврежден, пытаемся восстановить из метаданных...")
+            
+            # Переименовываем поврежденные файлы для резервной копии
+            import shutil
+            backup_suffix = dt.now().strftime("%Y%m%d_%H%M%S")
+            try:
+                corrupted_index_path = index_path.parent / f"index.faiss.corrupted_{backup_suffix}"
+                shutil.move(str(index_path), str(corrupted_index_path))
+                logger.info(f"Поврежденный индекс сохранён как: {corrupted_index_path.name}")
+            except Exception as backup_error:
+                logger.warning(f"Не удалось создать резервную копию поврежденного индекса: {backup_error}")
+                # Удаляем поврежденный файл, если не удалось переименовать
+                try:
+                    index_path.unlink()
+                except Exception:
+                    pass
+            
+            # Пытаемся восстановить индекс из метаданных
+            success, message = await _rebuild_index_from_metadata()
+            if success:
+                logger.info(f"✅ {message}")
+                # Загружаем восстановленный индекс
+                index = faiss.read_index(str(index_path))
+                # Загружаем метаданные
+                if metadata_path.exists():
+                    with open(metadata_path, "rb") as f:
+                        all_metadata = pickle.load(f)
+                else:
+                    all_metadata = []
+                logger.info(f"Загружен восстановленный индекс с {index.ntotal} векторами")
+            else:
+                # Восстановление не удалось, создаём новый пустой индекс
+                logger.error(f"❌ {message}")
+                logger.warning("⚠️ Восстановление не удалось, создаём новый пустой индекс")
+                logger.warning("⚠️ ВНИМАНИЕ: Все существующие данные в индексе будут потеряны!")
+                logger.warning("⚠️ Необходимо переиндексировать все книги заново")
+                index = faiss.IndexFlatL2(embedding_dim)
+                all_metadata = []
+                logger.info(f"Создан новый FAISS индекс с размерностью {embedding_dim}")
     else:
         # Создаём новый индекс
         index = faiss.IndexFlatL2(embedding_dim)
@@ -993,7 +1129,7 @@ async def _save_to_faiss(
     file_index[file_path_str] = {
         "file_hash": file_hash,
         "file_size": file_size,
-        "indexed_at": datetime.now().isoformat(),
+        "indexed_at": dt.now().isoformat(),
         "chunks_count": chunks_count,
         "first_chunk_index": first_chunk_index,
         "last_chunk_index": last_chunk_index,

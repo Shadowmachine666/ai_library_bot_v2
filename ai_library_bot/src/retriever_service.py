@@ -42,13 +42,26 @@ async def get_retriever() -> Any:
         raise FileNotFoundError(error_msg)
 
     logger.debug(f"Загрузка FAISS индекса из {index_path}")
-    index = faiss.read_index(str(index_path))
+    try:
+        index = faiss.read_index(str(index_path))
+    except Exception as e:
+        error_msg = (
+            f"FAISS индекс поврежден и не может быть загружен: {e}. "
+            f"Необходимо пересоздать индекс (удалить поврежденные файлы и переиндексировать все книги)."
+        )
+        logger.error(f"[RETRIEVER] ❌ {error_msg}")
+        raise RuntimeError(error_msg) from e
     
     # Загружаем метаданные
     metadata = []
     if metadata_path.exists():
-        with open(metadata_path, "rb") as f:
-            metadata = pickle.load(f)
+        try:
+            with open(metadata_path, "rb") as f:
+                metadata = pickle.load(f)
+        except Exception as e:
+            logger.error(f"[RETRIEVER] ❌ Ошибка при загрузке метаданных: {e}")
+            logger.warning("[RETRIEVER] ⚠️ Метаданные повреждены, поиск может работать некорректно")
+            metadata = []
         logger.debug(f"Загружено {len(metadata)} метаданных")
         
         # Проверяем метаданные из book2.txt на наличие проблем с кодировкой (отладочная проверка)

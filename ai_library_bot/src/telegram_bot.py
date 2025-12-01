@@ -1381,7 +1381,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if is_admin(user.id):
         help_text += "🔐 *Команды администратора:*\n\n"
         help_text += "`/pending` - Показать список ожидающих подтверждения файлов\n"
+        help_text += "`/pending_books` - Показать список непроиндексированных книг\n"
         help_text += "`/cleanup` - Очистить старые запросы (старше 1 дня)\n"
+        help_text += "`/cleanup_pending_books` - Полностью очистить список непроиндексированных книг\n"
         help_text += "`/categories` - Управление категориями для фильтрации\n\n"
         logger.info(f"Показана справка для администратора {user.id}")
     else:
@@ -1450,6 +1452,57 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"Ошибка при очистке старых запросов: {e}", exc_info=True)
         await update.message.reply_text(
             "❌ Произошла ошибка при очистке старых запросов."
+        )
+
+
+async def cleanup_pending_books_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /cleanup_pending_books для очистки списка непроиндексированных книг.
+
+    Удаляет все книги из списка ожидания индексации.
+
+    Args:
+        update: Объект Update от Telegram.
+        context: Контекст обработчика.
+    """
+    from src.pending_books_manager import clear_all_pending_books
+
+    user = update.effective_user
+    if not user or not update.message:
+        return
+
+    # Проверка прав администратора
+    if not is_admin(user.id):
+        await update.message.reply_text("❌ У вас нет прав администратора")
+        logger.warning(f"Попытка доступа к /cleanup_pending_books от неавторизованного пользователя: {user.id}")
+        return
+
+    logger.info(f"Команда /cleanup_pending_books от администратора {user.id}")
+
+    try:
+        # Очищаем весь список непроиндексированных книг
+        deleted_count = clear_all_pending_books()
+
+        if deleted_count > 0:
+            message = (
+                f"🧹 *Очистка списка непроиндексированных книг*\n\n"
+                f"✅ Удалено книг из списка ожидания: *{deleted_count}*\n\n"
+                f"Все книги удалены из списка непроиндексированных."
+            )
+            logger.info(f"Очищено {deleted_count} книг из списка ожидания администратором {user.id}")
+        else:
+            message = (
+                f"🧹 *Очистка списка непроиндексированных книг*\n\n"
+                f"✅ Список ожидания пуст.\n\n"
+                f"Нет книг для удаления."
+            )
+            logger.info(f"Список непроиндексированных книг пуст")
+
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Ошибка при очистке списка непроиндексированных книг: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ Произошла ошибка при очистке списка непроиндексированных книг."
         )
 
 
@@ -1740,6 +1793,7 @@ def create_bot_application() -> Application:
     application.add_handler(CommandHandler("pending", pending_confirmations_command))
     application.add_handler(CommandHandler("pending_books", pending_books_command))
     application.add_handler(CommandHandler("cleanup", cleanup_command))
+    application.add_handler(CommandHandler("cleanup_pending_books", cleanup_pending_books_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Регистрация обработчиков callback для подтверждений
@@ -1788,7 +1842,7 @@ def create_bot_application() -> Application:
     )
 
     logger.info(
-        "Обработчики зарегистрированы: /start, /help, /categories, /pending, /pending_books, /cleanup, "
+        "Обработчики зарегистрированы: /start, /help, /categories, /pending, /pending_books, /cleanup, /cleanup_pending_books, "
         "текстовые сообщения, callback для подтверждений, callback для категорий, callback для индексации книг"
     )
 
