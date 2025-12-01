@@ -41,7 +41,7 @@ async def get_retriever() -> Any:
         logger.error(f"[RETRIEVER] ❌ {error_msg}")
         raise FileNotFoundError(error_msg)
 
-    logger.info(f"Загрузка FAISS индекса из {index_path}")
+    logger.debug(f"Загрузка FAISS индекса из {index_path}")
     index = faiss.read_index(str(index_path))
     
     # Загружаем метаданные
@@ -49,7 +49,7 @@ async def get_retriever() -> Any:
     if metadata_path.exists():
         with open(metadata_path, "rb") as f:
             metadata = pickle.load(f)
-        logger.info(f"Загружено {len(metadata)} метаданных")
+        logger.debug(f"Загружено {len(metadata)} метаданных")
         
         # Проверяем метаданные из book2.txt на наличие проблем с кодировкой (отладочная проверка)
         book2_metadata = [m for m in metadata if m.get("source") == "book2.txt"]
@@ -70,7 +70,7 @@ async def get_retriever() -> Any:
                 else:
                     logger.debug(f"[ПРОВЕРКА] ✅ Чанк {chunk_idx} из book2.txt выглядит нормально")
     
-    logger.info(f"Индекс загружен: {index.ntotal} векторов, размерность {index.d}")
+    logger.debug(f"Индекс загружен: {index.ntotal} векторов, размерность {index.d}")
     
     return {"index": index, "metadata": metadata}
 
@@ -94,9 +94,9 @@ async def _create_query_embedding(query: str) -> list[float]:
 
     client = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
     
-    logger.info(f"[RETRIEVER] Создание эмбеддинга для запроса через OpenAI API")
+    logger.debug(f"[RETRIEVER] Создание эмбеддинга для запроса через OpenAI API")
     logger.debug(f"[RETRIEVER] Запрос: {query[:100]}...")
-    logger.info(f"[RETRIEVER] Модель эмбеддингов: {Config.EMBEDDING_MODEL}")
+    logger.debug(f"[RETRIEVER] Модель эмбеддингов: {Config.EMBEDDING_MODEL}")
     
     try:
         response = await client.embeddings.create(
@@ -104,7 +104,7 @@ async def _create_query_embedding(query: str) -> list[float]:
             input=query
         )
         embedding = response.data[0].embedding
-        logger.info(f"[RETRIEVER] ✅ Эмбеддинг создан, размерность: {len(embedding)}")
+        logger.debug(f"[RETRIEVER] ✅ Эмбеддинг создан, размерность: {len(embedding)}")
         logger.debug(f"[RETRIEVER] Первые 5 значений эмбеддинга: {embedding[:5]}")
         return embedding
     except Exception as e:
@@ -140,7 +140,7 @@ async def _search_in_faiss(
     index = retriever["index"]
     metadata = retriever["metadata"]
 
-    logger.info(f"[RETRIEVER] Поиск в FAISS индексе: top_k={top_k}, векторов в индексе: {index.ntotal}")
+    logger.debug(f"[RETRIEVER] Поиск в FAISS индексе: top_k={top_k}, векторов в индексе: {index.ntotal}")
 
     # Преобразуем эмбеддинг запроса в numpy array
     query_vector = np.array([query_embedding], dtype=np.float32)
@@ -148,23 +148,24 @@ async def _search_in_faiss(
 
     # Выполняем поиск (ограничиваем top_k количеством векторов в индексе)
     actual_top_k = min(top_k, index.ntotal)
-    logger.info(f"[RETRIEVER] Выполнение поиска в FAISS индексе (actual_top_k={actual_top_k}, векторов в индексе={index.ntotal})...")
+    logger.debug(f"[RETRIEVER] Выполнение поиска в FAISS индексе (actual_top_k={actual_top_k}, векторов в индексе={index.ntotal})...")
     
     # Для диагностики: ищем больше результатов, чтобы увидеть, есть ли чанки из других источников
     search_k = min(actual_top_k * 2, index.ntotal)  # Ищем в 2 раза больше для диагностики
     distances, indices = index.search(query_vector, search_k)
-    logger.info(f"[RETRIEVER] Поиск выполнен, найдено {len(indices[0])} результатов (искали {search_k})")
+    logger.debug(f"[RETRIEVER] Поиск выполнен, найдено {len(indices[0])} результатов (искали {search_k})")
     
-    # Логируем распределение по источникам в расширенном поиске
+    # Логируем распределение по источникам в расширенном поиске (только на DEBUG)
     extended_sources = {}
     for idx in indices[0]:
         if idx >= 0 and idx < len(metadata):
             source = metadata[idx].get("source", "unknown")
             extended_sources[source] = extended_sources.get(source, 0) + 1
-    logger.info(f"[RETRIEVER] Распределение по источникам в расширенном поиске (топ-{search_k}): {extended_sources}")
+    logger.debug(f"[RETRIEVER] Распределение по источникам в расширенном поиске (топ-{search_k}): {extended_sources}")
 
     # Берём только actual_top_k результатов для дальнейшей обработки
     results = []
+    
     for i, (dist, idx) in enumerate(zip(distances[0][:actual_top_k], indices[0][:actual_top_k])):
         # Преобразуем расстояние в score (чем меньше расстояние, тем выше score)
         # Используем формулу: score = 1 / (1 + distance)
@@ -227,11 +228,30 @@ async def _search_in_faiss(
             logger.warning(f"[RETRIEVER] ⚠️ Метаданные для индекса {idx} не найдены (всего метаданных: {len(metadata)})")
         
         results.append((chunk_data, score))
-        logger.info(
+        # Детали каждого результата на DEBUG
+        logger.debug(
             f"[RETRIEVER] Результат {i+1}: idx={idx}, distance={distance:.4f}, "
             f"score={score:.4f}, source={chunk_data.get('source', 'unknown')}, "
             f"text_preview={chunk_data.get('text', '')[:80]}..."
         )
+
+    # Агрегированная статистика результатов поиска на INFO
+    if results:
+        scores = [score for _, score in results]
+        min_score = min(scores)
+        max_score = max(scores)
+        sources_count = {}
+        for chunk_data, _ in results:
+            source = chunk_data.get("source", "unknown")
+            sources_count[source] = sources_count.get(source, 0) + 1
+        
+        logger.info(
+            f"[RETRIEVER] Найдено {len(results)} результатов: "
+            f"score {min_score:.3f}-{max_score:.3f}, "
+            f"источники: {dict(sources_count)}"
+        )
+    else:
+        logger.warning("[RETRIEVER] ⚠️ Не найдено результатов после обработки")
 
     return results
 
@@ -248,7 +268,8 @@ def _filter_by_score(results: list[tuple[Any, float]], threshold: float) -> list
     """
     filtered = [(chunk, score) for chunk, score in results if score >= threshold]
     logger.debug(
-        f"Фильтрация результатов: {len(results)} → {len(filtered)} " f"(threshold={threshold})"
+        f"[RETRIEVER] Фильтрация результатов: {len(results)} → {len(filtered)} "
+        f"(threshold={threshold})"
     )
     return filtered
 
@@ -283,14 +304,15 @@ def _apply_smart_filtering(results: list[tuple[Any, float]]) -> list[tuple[Any, 
     
     if all_high_score:
         # Используем только топ-N чанков
-        logger.info(
+        # Детали на DEBUG, итоговая статистика будет в retrieve_chunks
+        logger.debug(
             f"[RETRIEVER] 🎯 Умная фильтрация: топ-{top_n} чанков имеют score >= {Config.SMART_FILTERING_SCORE_THRESHOLD}, "
             f"используем только их (экономия: {len(results) - top_n} чанков)"
         )
         return top_chunks
     else:
         # Используем все результаты
-        logger.info(
+        logger.debug(
             f"[RETRIEVER] 📊 Умная фильтрация: не все топ-{top_n} чанков имеют высокий score, "
             f"используем все {len(results)} результатов"
         )
@@ -334,21 +356,21 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
 
     # Инициализация retriever
     init_start_time = time.perf_counter()
-    logger.info(f"[RETRIEVER] Этап 1/3: Инициализация retriever (загрузка FAISS индекса)")
+    logger.debug(f"[RETRIEVER] Этап 1/3: Инициализация retriever (загрузка FAISS индекса)")
     retriever = await get_retriever()
     init_time = time.perf_counter() - init_start_time
     logger.debug(f"[RETRIEVER] Инициализация завершена за {init_time:.3f}с")
 
     # Создание эмбеддинга запроса
     embedding_start_time = time.perf_counter()
-    logger.info(f"[RETRIEVER] Этап 2/3: Создание эмбеддинга запроса через OpenAI API")
+    logger.debug(f"[RETRIEVER] Этап 2/3: Создание эмбеддинга запроса через OpenAI API")
     query_embedding = await _create_query_embedding(query)
     embedding_time = time.perf_counter() - embedding_start_time
     logger.debug(f"[RETRIEVER] Создание эмбеддинга завершено за {embedding_time:.3f}с")
 
     # Поиск в FAISS
     search_start_time = time.perf_counter()
-    logger.info(f"[RETRIEVER] Этап 3/3: Поиск в FAISS индексе (top_k={Config.TOP_K})")
+    logger.debug(f"[RETRIEVER] Этап 3/3: Поиск в FAISS индексе (top_k={Config.TOP_K})")
     results = await _search_in_faiss(retriever, query_embedding, top_k=Config.TOP_K)
     search_time = time.perf_counter() - search_start_time
     logger.debug(f"[RETRIEVER] Поиск в FAISS завершён за {search_time:.3f}с")
@@ -387,9 +409,10 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
                 # Получаем категории из метаданных
                 chunk_topics = chunk_meta.get("topics", [])
                 
-                logger.info(
+                # Детали на DEBUG
+                logger.debug(
                     f"[RETRIEVER] [CATEGORY_FILTER] Чанк {chunk_idx} ({source}): "
-                    f"категории в метаданных={chunk_topics} (тип: {type(chunk_topics)})"
+                    f"категории={chunk_topics}"
                 )
                 
                 # Проверяем, есть ли пересечение категорий
@@ -410,9 +433,10 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
                         for topic_lower in chunk_topics_lower
                     )
                     
-                    logger.info(
+                    # Детали пересечения на DEBUG
+                    logger.debug(
                         f"[RETRIEVER] [CATEGORY_FILTER] Чанк {chunk_idx}: "
-                        f"пересечение найдено={has_match} "
+                        f"пересечение={has_match} "
                         f"(категории чанка: {chunk_topics_lower}, "
                         f"категории фильтра: {filter_categories_lower})"
                     )
@@ -424,16 +448,15 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
                             f"прошел фильтрацию"
                         )
                     else:
-                        logger.info(
+                        # Детали отфильтрованных чанков на DEBUG
+                        logger.debug(
                             f"[RETRIEVER] [CATEGORY_FILTER] ❌ Чанк {chunk_idx} отфильтрован: "
-                            f"нет пересечения категорий "
-                            f"(категории чанка: {chunk_topics}, фильтр: {filter_categories})"
+                            f"нет пересечения (категории чанка: {chunk_topics}, фильтр: {filter_categories})"
                         )
                 else:
                     logger.warning(
                         f"[RETRIEVER] [CATEGORY_FILTER] ⚠️ Чанк {chunk_idx} не имеет категорий "
-                        f"в метаданных (chunk_topics={chunk_topics}, тип: {type(chunk_topics)}). "
-                        f"Пропускаем при фильтрации."
+                        f"в метаданных. Пропускаем при фильтрации."
                     )
             else:
                 # Если нет метаданных, пропускаем чанк (или оставляем, в зависимости от политики)
@@ -444,16 +467,17 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
                     f"Пропускаем при фильтрации по категориям."
                 )
         
-        logger.info(
-            f"[RETRIEVER] [CATEGORY_FILTER] Результаты фильтрации: "
-            f"было {len(results)} результатов, "
-            f"осталось {len(filtered_by_category)} результатов"
-        )
+        # Итоговая статистика фильтрации на INFO
+        filtered_count = len(filtered_by_category)
+        initial_count = len(results)
+        removed_count = initial_count - filtered_count
         
         if filtered_by_category:
             results = filtered_by_category
             logger.info(
-                f"[RETRIEVER] ✅ После фильтрации по категориям: {len(results)} результатов"
+                f"[RETRIEVER] Фильтрация по категориям {filter_categories}: "
+                f"{filtered_count}/{initial_count} результатов "
+                f"(отфильтровано: {removed_count})"
             )
         else:
             # Если все результаты отфильтрованы, возвращаем NOT_FOUND
@@ -467,39 +491,52 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
     else:
         logger.debug("[RETRIEVER] Фильтрация по категориям не применяется")
 
+    # Сохраняем количество до фильтрации для итоговой статистики
+    results_before_smart = len(results)
+    
     # Умная фильтрация (если включена)
     if Config.SMART_FILTERING_ENABLED:
-        results = _apply_smart_filtering(results)
-        logger.info(f"[RETRIEVER] После умной фильтрации: {len(results)} результатов")
-
+        results_after_smart = _apply_smart_filtering(results)
+        smart_filtered_count = len(results) - len(results_after_smart)
+        results = results_after_smart
+        if smart_filtered_count > 0:
+            logger.debug(
+                f"[RETRIEVER] Умная фильтрация: {len(results)}/{results_before_smart} результатов "
+                f"(отфильтровано: {smart_filtered_count})"
+            )
+    
     # Фильтрация по порогу релевантности
-    logger.info(f"[RETRIEVER] Найдено {len(results)} результатов до фильтрации")
-    logger.info(f"[RETRIEVER] Порог релевантности (SCORE_THRESHOLD): {Config.SCORE_THRESHOLD}")
+    results_before_score_filter = len(results)
+    filtered_results = _filter_by_score(results, Config.SCORE_THRESHOLD)
+    score_filtered_count = results_before_score_filter - len(filtered_results)
     
-    # Подсчитываем источники
-    sources_count = {}
-    for chunk_data, score in results:
-        source = chunk_data.get('source', 'unknown')
-        sources_count[source] = sources_count.get(source, 0) + 1
-    logger.info(f"[RETRIEVER] Распределение по источникам: {sources_count}")
-    
-    # Логируем все найденные результаты с их score
-    for i, (chunk_data, score) in enumerate(results):
+    # Объединённая статистика фильтрации на INFO
+    if Config.SMART_FILTERING_ENABLED:
         logger.info(
-            f"[RETRIEVER] Результат {i+1}: score={score:.4f}, "
-            f"source={chunk_data.get('source', 'unknown')}, "
-            f"text_preview={chunk_data.get('text', '')[:100]}..."
+            f"[RETRIEVER] Фильтрация: умная → {len(results)}, "
+            f"порог (≥{Config.SCORE_THRESHOLD}) → {len(filtered_results)} результатов "
+            f"(изначально: {results_before_smart})"
+        )
+    else:
+        logger.info(
+            f"[RETRIEVER] Фильтрация по порогу (≥{Config.SCORE_THRESHOLD}): "
+            f"{len(filtered_results)}/{results_before_score_filter} результатов "
+            f"(отфильтровано: {score_filtered_count})"
         )
     
-    filtered_results = _filter_by_score(results, Config.SCORE_THRESHOLD)
-    logger.info(f"[RETRIEVER] После фильтрации осталось {len(filtered_results)} результатов")
-    
-    # Подсчитываем источники после фильтрации
-    filtered_sources_count = {}
-    for chunk_data, score in filtered_results:
-        source = chunk_data.get('source', 'unknown')
-        filtered_sources_count[source] = filtered_sources_count.get(source, 0) + 1
-    logger.info(f"[RETRIEVER] Распределение по источникам после фильтрации: {filtered_sources_count}")
+    # Подсчитываем источники после всех фильтраций
+    if filtered_results:
+        filtered_sources_count = {}
+        scores = [score for _, score in filtered_results]
+        min_score = min(scores)
+        max_score = max(scores)
+        for chunk_data, score in filtered_results:
+            source = chunk_data.get('source', 'unknown')
+            filtered_sources_count[source] = filtered_sources_count.get(source, 0) + 1
+        logger.info(
+            f"[RETRIEVER] Итоговые результаты: score {min_score:.3f}-{max_score:.3f}, "
+            f"источники: {dict(filtered_sources_count)}"
+        )
 
     # Если нет релевантных результатов, но есть результаты - берём лучшие
     if not filtered_results and results:
@@ -509,9 +546,11 @@ async def retrieve_chunks(query: str, filter_categories: list[str] | None = None
         )
         # Берём топ-3 с наилучшими score, даже если они ниже threshold
         filtered_results = sorted(results, key=lambda x: x[1], reverse=True)[:3]
-        logger.info(f"[RETRIEVER] Используем {len(filtered_results)} результатов с наилучшими score:")
-        for i, (chunk_data, score) in enumerate(filtered_results):
-            logger.info(f"[RETRIEVER]   - Результат {i+1}: score={score:.4f}, source={chunk_data.get('source', 'unknown')}")
+        best_scores = [score for _, score in filtered_results]
+        logger.info(
+            f"[RETRIEVER] Используем {len(filtered_results)} результатов с наилучшими score: "
+            f"{min(best_scores):.3f}-{max(best_scores):.3f}"
+        )
     
     # Если всё равно нет результатов
     if not filtered_results:

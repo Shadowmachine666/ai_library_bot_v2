@@ -1411,11 +1411,8 @@ async def _continue_indexing_with_categories(
         book_title, file_path, categories, len(chunks)
     )
     
-    # Обновляем каталог библиотеки после успешной индексации
-    try:
-        await update_library_catalog()
-    except Exception as e:
-        logger.warning(f"[INDEXING] ⚠️ Ошибка при обновлении каталога библиотеки: {e}")
+    # Каталог библиотеки будет обновлён в конце индексации (в ingest_books)
+    # для оптимизации: одно обновление вместо множества при индексации нескольких файлов
     
     logger.info(f"[INDEXING] ===== Обработка файла {file_path.name} завершена =====\n")
 

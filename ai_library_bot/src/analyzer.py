@@ -178,8 +178,8 @@ async def _call_llm(prompt: str, max_retries: int | None = None) -> str:
 
     client = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
 
-    logger.info(f"[ANALYZER] Вызов OpenAI LLM API")
-    logger.info(f"[ANALYZER] Модель: {Config.LLM_MODEL}, температура: {Config.LLM_TEMPERATURE}")
+    logger.debug(f"[ANALYZER] Вызов OpenAI LLM API")
+    logger.debug(f"[ANALYZER] Модель: {Config.LLM_MODEL}, температура: {Config.LLM_TEMPERATURE}")
 
     # Разделяем системный промпт и пользовательский промпт
     system_prompt = _load_system_prompt()
@@ -197,7 +197,7 @@ async def _call_llm(prompt: str, max_retries: int | None = None) -> str:
     last_error = None
     for attempt in range(max_retries):
         try:
-            logger.info(f"[ANALYZER] Отправка запроса к OpenAI API (попытка {attempt + 1}/{max_retries})")
+            logger.debug(f"[ANALYZER] Отправка запроса к OpenAI API (попытка {attempt + 1}/{max_retries})")
             response = await client.chat.completions.create(
                 model=Config.LLM_MODEL,
                 messages=[
@@ -212,7 +212,7 @@ async def _call_llm(prompt: str, max_retries: int | None = None) -> str:
             if not llm_response:
                 raise ValueError("LLM вернул пустой ответ")
             
-            logger.info(f"[ANALYZER] ✅ LLM ответ получен (попытка {attempt + 1}), длина: {len(llm_response)} символов")
+            logger.debug(f"[ANALYZER] ✅ LLM ответ получен (попытка {attempt + 1}), длина: {len(llm_response)} символов")
             logger.debug(f"[ANALYZER] LLM ответ: {llm_response[:500]}...")
             return llm_response
 
@@ -281,7 +281,7 @@ async def _parse_llm_response(response_text: str) -> AnalysisResponse:
     try:
         # Валидируем через Pydantic
         response = AnalysisResponse(**data)
-        logger.info(f"[ANALYZER] ✅ Ответ валидирован через Pydantic, статус: {response.status}")
+        logger.debug(f"[ANALYZER] ✅ Ответ валидирован через Pydantic, статус: {response.status}")
         return response
     except Exception as e:
         error_type = type(e).__name__
@@ -330,42 +330,53 @@ async def analyze(chunks: list[dict[str, Any]], user_query: str) -> AnalysisResp
     analysis_start_time = time.perf_counter()
     logger.info(f"[ANALYZER] ===== Начало анализа =====")
     logger.info(f"[ANALYZER] Запрос: {user_query}")
-    logger.info(f"[ANALYZER] Количество чанков для анализа: {len(chunks)}")
     
-    # Логируем информацию о чанках
+    # Детали каждого чанка на DEBUG
     for i, chunk in enumerate(chunks):
-        logger.info(
+        logger.debug(
             f"[ANALYZER] Чанк {i+1}: source={chunk.get('source')}, "
             f"score={chunk.get('score')}, text_length={len(chunk.get('text', ''))}, "
             f"text_preview={chunk.get('text', '')[:100]}..."
         )
+    
+    # Агрегированная статистика на INFO
+    sources = [chunk.get("source", "unknown") for chunk in chunks]
+    scores = [chunk.get("score", 0) for chunk in chunks]
+    sources_count = {s: sources.count(s) for s in set(sources)}
+    min_score = min(scores) if scores else 0
+    max_score = max(scores) if scores else 0
+    
+    logger.info(
+        f"[ANALYZER] Анализ {len(chunks)} чанков: "
+        f"источники {sources_count}, score {min_score:.3f}-{max_score:.3f}"
+    )
 
     # Собираем промпт
     prompt_start_time = time.perf_counter()
-    logger.info(f"[ANALYZER] Этап 1/3: Сборка промпта")
+    logger.debug(f"[ANALYZER] Этап 1/3: Сборка промпта")
     prompt = _build_prompt(chunks, user_query)
     prompt_time = time.perf_counter() - prompt_start_time
-    logger.info(f"[ANALYZER] Промпт собран, длина: {len(prompt)} символов (время: {prompt_time:.3f}с)")
+    logger.debug(f"[ANALYZER] Промпт собран, длина: {len(prompt)} символов (время: {prompt_time:.3f}с)")
     logger.debug(f"[ANALYZER] Промпт (первые 500 символов): {prompt[:500]}...")
 
     # Вызываем LLM с retry policy
     llm_start_time = time.perf_counter()
-    logger.info(f"[ANALYZER] Этап 2/3: Вызов LLM (модель: {Config.LLM_MODEL}, max_retries: {Config.LLM_MAX_RETRIES})")
+    logger.debug(f"[ANALYZER] Этап 2/3: Вызов LLM (модель: {Config.LLM_MODEL}, max_retries: {Config.LLM_MAX_RETRIES})")
     max_retries = Config.LLM_MAX_RETRIES
     last_error = None
 
     for attempt in range(max_retries):
         try:
-            logger.info(f"[ANALYZER] Попытка {attempt + 1}/{max_retries}: вызов LLM")
+            logger.debug(f"[ANALYZER] Попытка {attempt + 1}/{max_retries}: вызов LLM")
             # Вызов LLM
             response_text = await _call_llm(prompt, max_retries=1)
             llm_time = time.perf_counter() - llm_start_time
-            logger.info(f"[ANALYZER] ✅ LLM ответ получен, длина: {len(response_text)} символов (время: {llm_time:.3f}с)")
+            logger.debug(f"[ANALYZER] ✅ LLM ответ получен, длина: {len(response_text)} символов (время: {llm_time:.3f}с)")
             logger.debug(f"[ANALYZER] LLM ответ (первые 500 символов): {response_text[:500]}...")
 
             # Парсинг и валидация
             parse_start_time = time.perf_counter()
-            logger.info(f"[ANALYZER] Этап 3/3: Парсинг и валидация ответа")
+            logger.debug(f"[ANALYZER] Этап 3/3: Парсинг и валидация ответа")
             response = await _parse_llm_response(response_text)
             parse_time = time.perf_counter() - parse_start_time
             logger.debug(f"[ANALYZER] Парсинг и валидация завершены за {parse_time:.3f}с")
@@ -384,7 +395,7 @@ async def analyze(chunks: list[dict[str, Any]], user_query: str) -> AnalysisResp
                     
                     # Пробуем еще раз с более явным промптом
                     fallback_prompt = _build_fallback_prompt(chunks, user_query)
-                    logger.info(f"[ANALYZER] Fallback: повторный вызов LLM с расширенным промптом")
+                    logger.debug(f"[ANALYZER] Fallback: повторный вызов LLM с расширенным промптом")
                     
                     try:
                         fallback_response_text = await _call_llm(fallback_prompt, max_retries=1)
@@ -392,16 +403,12 @@ async def analyze(chunks: list[dict[str, Any]], user_query: str) -> AnalysisResp
                         
                         if fallback_response.status == "SUCCESS":
                             analysis_time = time.perf_counter() - analysis_start_time
+                            quotes_count = len(fallback_response.result.quotes) if fallback_response.result else 0
                             logger.info(
-                                f"[ANALYZER] ✅ Fallback успешен! LLM нашел ответ при повторной попытке. "
-                                f"Причина первоначального NOT_FOUND: возможно, недостаточно явный контекст."
-                            )
-                            if fallback_response.result:
-                                logger.info(f"[ANALYZER] Ответ содержит {len(fallback_response.result.quotes)} цитат")
-                            logger.info(
-                                f"[ANALYZER] ===== Анализ завершён ===== "
-                                f"(время: сборка промпта={prompt_time:.3f}с, LLM={llm_time:.3f}с, "
-                                f"парсинг={parse_time:.3f}с, всего={analysis_time:.3f}с)"
+                                f"[ANALYZER] ✅ Fallback успешен: статус={fallback_response.status}, "
+                                f"цитат={quotes_count}, "
+                                f"время: промпт={prompt_time:.3f}с, LLM={llm_time:.3f}с, "
+                                f"парсинг={parse_time:.3f}с, всего={analysis_time:.3f}с"
                             )
                             return fallback_response
                         else:
@@ -414,19 +421,18 @@ async def analyze(chunks: list[dict[str, Any]], user_query: str) -> AnalysisResp
                     except Exception as e:
                         logger.warning(f"[ANALYZER] Ошибка при fallback попытке: {e}. Возвращаем исходный NOT_FOUND.")
                 else:
-                    logger.info(
+                    logger.debug(
                         f"[ANALYZER] LLM вернул NOT_FOUND. Score чанков низкий (максимальный: {max_score:.3f}), "
                         f"поэтому fallback не применяется."
                     )
 
             analysis_time = time.perf_counter() - analysis_start_time
-            logger.info(f"[ANALYZER] ✅ Анализ завершён успешно, статус: {response.status}")
-            if response.result:
-                logger.info(f"[ANALYZER] Ответ содержит {len(response.result.quotes)} цитат")
+            quotes_count = len(response.result.quotes) if response.result else 0
             logger.info(
-                f"[ANALYZER] ===== Анализ завершён ===== "
-                f"(время: сборка промпта={prompt_time:.3f}с, LLM={llm_time:.3f}с, "
-                f"парсинг={parse_time:.3f}с, всего={analysis_time:.3f}с)"
+                f"[ANALYZER] ✅ Анализ завершён: статус={response.status}, "
+                f"цитат={quotes_count}, "
+                f"время: промпт={prompt_time:.3f}с, LLM={llm_time:.3f}с, "
+                f"парсинг={parse_time:.3f}с, всего={analysis_time:.3f}с"
             )
             return response
 

@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -190,7 +191,7 @@ async def _process_query_with_categories(
     try:
         # 1. Проверка кэша (с учетом категорий)
         cache_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 1/7: Проверка кэша")
+        logger.debug(f"[TELEGRAM_BOT] Этап 1/7: Проверка кэша")
         cache_key = f"query:{user_query.lower()}:cats:{sorted(filter_categories) if filter_categories else 'all'}"
         cached_response = await _get_from_cache(cache_key)
         cache_time = time.perf_counter() - cache_start_time
@@ -198,8 +199,8 @@ async def _process_query_with_categories(
         if cached_response:
             total_time = time.perf_counter() - total_start_time
             logger.info(
-                f"[TELEGRAM_BOT] ✅ Ответ найден в кэше для запроса: {user_query[:50]}... "
-                f"(время проверки кэша: {cache_time:.3f}с, общее время: {total_time:.3f}с)"
+                f"[TELEGRAM_BOT] ✅ Ответ из кэша: {user_query[:50]}... "
+                f"(время: {total_time:.3f}с)"
             )
             # Сохраняем контекст запроса для кнопки изменения категорий
             query_hash = save_query_context(user_id, user_query, filter_categories)
@@ -211,14 +212,14 @@ async def _process_query_with_categories(
             )
             return
         
-        logger.info(
+        logger.debug(
             f"[TELEGRAM_BOT] Кэш не содержит ответа, продолжаем обработку "
             f"(время проверки кэша: {cache_time:.3f}с)"
         )
 
         # 2. Поиск релевантных чанков
         retrieval_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 2/7: Поиск релевантных чанков")
+        logger.info(f"[TELEGRAM_BOT] Поиск релевантных чанков...")
         chunks = await retrieve_chunks(user_query, filter_categories=filter_categories)
         retrieval_time = time.perf_counter() - retrieval_start_time
 
@@ -284,24 +285,24 @@ async def _process_query_with_categories(
             )
             return
 
-        logger.info(
+        logger.debug(
             f"[TELEGRAM_BOT] ✅ Найдено {len(chunks)} релевантных чанков "
             f"(время поиска: {retrieval_time:.3f}с)"
         )
 
         # 3. Анализ чанков
         analysis_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 3/7: Анализ чанков через LLM")
+        logger.info(f"[TELEGRAM_BOT] Анализ через LLM...")
         analysis_response = await analyze(chunks, user_query)
         analysis_time = time.perf_counter() - analysis_start_time
-        logger.info(
+        logger.debug(
             f"[TELEGRAM_BOT] ✅ Анализ завершён, статус: {analysis_response.status} "
             f"(время анализа: {analysis_time:.3f}с)"
         )
 
         # 4. Форматирование ответа
         formatting_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 4/7: Форматирование ответа")
+        logger.debug(f"[TELEGRAM_BOT] Этап 4/7: Форматирование ответа")
         response_text = format_response(analysis_response, used_categories=filter_categories)
         formatting_time = time.perf_counter() - formatting_start_time
         logger.debug(
@@ -311,7 +312,7 @@ async def _process_query_with_categories(
 
         # 5. Сохранение в кэш
         cache_save_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 5/7: Сохранение в кэш")
+        logger.debug(f"[TELEGRAM_BOT] Этап 5/7: Сохранение в кэш")
         await _set_to_cache(cache_key, response_text)
         cache_save_time = time.perf_counter() - cache_save_start_time
 
@@ -321,7 +322,7 @@ async def _process_query_with_categories(
 
         # 7. Отправка ответа
         send_start_time = time.perf_counter()
-        logger.info(f"[TELEGRAM_BOT] Этап 6/7: Отправка ответа пользователю")
+        logger.debug(f"[TELEGRAM_BOT] Этап 6/7: Отправка ответа пользователю")
         try:
             await processing_message.edit_text(
                 response_text,
@@ -365,17 +366,9 @@ async def _process_query_with_categories(
         total_time = time.perf_counter() - total_start_time
         
         logger.info(
-            f"[TELEGRAM_BOT] ✅ Ответ успешно отправлен пользователю {user_id} "
-            f"(время отправки: {send_time:.3f}с, общее время: {total_time:.3f}с)"
-        )
-        logger.info(
             f"[TELEGRAM_BOT] 📊 Производительность: "
-            f"поиск={retrieval_time:.3f}с, "
-            f"анализ={analysis_time:.3f}с, "
-            f"форматирование={formatting_time:.3f}с, "
-            f"кэш={cache_save_time:.3f}с, "
-            f"отправка={send_time:.3f}с, "
-            f"всего={total_time:.3f}с"
+            f"поиск={retrieval_time:.3f}с, анализ={analysis_time:.3f}с, "
+            f"отправка={send_time:.3f}с, всего={total_time:.3f}с"
         )
 
     except Exception as e:
@@ -622,6 +615,21 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
             logger.warning(f"[TELEGRAM_BOT] [CALLBACK] ❌ Неизвестное действие в callback: {action}")
             await query.answer("❌ Неизвестное действие", show_alert=True)
 
+    except BadRequest as e:
+        error_msg = str(e)
+        if "Query is too old" in error_msg or "query is too old" in error_msg.lower():
+            logger.warning(
+                f"[TELEGRAM_BOT] [CALLBACK] ⚠️ Callback query истёк: {query.data[:50] if query and query.data else 'unknown'}"
+            )
+        else:
+            logger.error(
+                f"[TELEGRAM_BOT] [CALLBACK] ❌ BadRequest: {e}",
+                exc_info=True
+            )
+        try:
+            await query.answer("❌ Запрос устарел. Попробуйте снова.", show_alert=True)
+        except Exception:
+            pass  # Игнорируем ошибки при ответе на истёкший query
     except Exception as e:
         logger.error(
             f"[TELEGRAM_BOT] [CALLBACK] ❌ Критическая ошибка при обработке callback: {e}",
@@ -881,6 +889,21 @@ async def handle_query_category_callback(update: Update, context: ContextTypes.D
                 update, context, user_query, filter_categories, user.id, query.message
             )
             
+    except BadRequest as e:
+        error_msg = str(e)
+        if "Query is too old" in error_msg or "query is too old" in error_msg.lower():
+            logger.warning(
+                f"[TELEGRAM_BOT] [QUERY_CAT] ⚠️ Callback query истёк: {callback_data[:50] if 'callback_data' in locals() else 'unknown'}"
+            )
+        else:
+            logger.error(
+                f"[TELEGRAM_BOT] [QUERY_CAT] ❌ BadRequest: {e}",
+                exc_info=True
+            )
+        try:
+            await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+        except Exception:
+            pass  # Игнорируем ошибки при ответе на истёкший query
     except Exception as e:
         logger.error(
             f"[TELEGRAM_BOT] [QUERY_CAT] ❌ Ошибка при обработке callback: {e}",
@@ -953,6 +976,21 @@ async def handle_change_categories_callback(update: Update, context: ContextType
                     f"для запроса {query_hash}"
                 )
             
+    except BadRequest as e:
+        error_msg = str(e)
+        if "Query is too old" in error_msg or "query is too old" in error_msg.lower():
+            logger.warning(
+                f"[TELEGRAM_BOT] [CHANGE_CATS] ⚠️ Callback query истёк: {query.data[:50] if query and query.data else 'unknown'}"
+            )
+        else:
+            logger.error(
+                f"[TELEGRAM_BOT] [CHANGE_CATS] ❌ BadRequest: {e}",
+                exc_info=True
+            )
+        try:
+            await query.answer("❌ Запрос устарел. Задайте вопрос заново.", show_alert=True)
+        except Exception:
+            pass  # Игнорируем ошибки при ответе на истёкший query
     except Exception as e:
         logger.error(
             f"[TELEGRAM_BOT] [CHANGE_CATS] ❌ Ошибка при обработке callback: {e}",
