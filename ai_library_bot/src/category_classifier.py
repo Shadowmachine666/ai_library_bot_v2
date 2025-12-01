@@ -395,3 +395,4 @@ def _parse_classification_response(response_text: str) -> CategoryClassification
             f"Полученные ключи: {list(data.keys()) if isinstance(data, dict) else 'не словарь'}"
         ) from e
 
+

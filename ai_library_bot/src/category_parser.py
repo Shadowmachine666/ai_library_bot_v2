@@ -155,3 +155,4 @@ def extract_book_title_only(file_path: Path) -> str:
     title, _ = parse_categories_from_filename(file_path)
     return title
 
+

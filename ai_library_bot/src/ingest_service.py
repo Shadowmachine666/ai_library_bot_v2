@@ -30,6 +30,7 @@ from src.admin_messages import (
 )
 from src.cache_utils import clear_cache
 from src.pending_books_manager import remove_pending_book
+from src.library_catalog import update_library_catalog
 
 logger = setup_logger(__name__)
 
@@ -420,10 +421,19 @@ async def _remove_file_from_index(file_path: Path, file_index: FileIndex) -> Non
     with open(metadata_path, "wb") as f:
         pickle.dump(new_metadata, f, protocol=4)
     
+    # Сохраняем обновлённый индекс файлов
+    _save_file_index(file_index)
+    
     logger.info(
         f"Файл {file_path.name} удалён из индекса: "
         f"удалено {len(chunks_to_remove)} чанков, осталось {new_index.ntotal} векторов"
     )
+    
+    # Обновляем каталог библиотеки после удаления книги
+    try:
+        await update_library_catalog()
+    except Exception as e:
+        logger.warning(f"[INDEXING] ⚠️ Ошибка при обновлении каталога библиотеки после удаления: {e}")
 
 
 async def _delete_file_completely(file_path: Path) -> None:
@@ -1401,6 +1411,12 @@ async def _continue_indexing_with_categories(
         book_title, file_path, categories, len(chunks)
     )
     
+    # Обновляем каталог библиотеки после успешной индексации
+    try:
+        await update_library_catalog()
+    except Exception as e:
+        logger.warning(f"[INDEXING] ⚠️ Ошибка при обновлении каталога библиотеки: {e}")
+    
     logger.info(f"[INDEXING] ===== Обработка файла {file_path.name} завершена =====\n")
 
 
@@ -1700,5 +1716,13 @@ async def ingest_books(folder_path: str, force: bool = False) -> None:
             f"[INDEXING] ⚠️ ВНИМАНИЕ: {final_pending} файлов ожидают подтверждения категорий. "
             f"Используйте команду /pending в боте для просмотра."
         )
+    
+    # Обновляем каталог библиотеки после завершения индексации
+    # (если были изменения: добавлены, удалены или изменены книги)
+    if processed > 0 or files_were_deleted or len(files_to_delete_from_index) > 0:
+        try:
+            await update_library_catalog()
+        except Exception as e:
+            logger.warning(f"[INDEXING] ⚠️ Ошибка при обновлении каталога библиотеки: {e}")
     
     logger.info(f"[INDEXING] ===== ИНДЕКСАЦИЯ ЗАВЕРШЕНА =====\n")

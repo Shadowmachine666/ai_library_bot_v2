@@ -69,3 +69,4 @@ def require_admin(user_id: int) -> None:
         logger.warning(error_msg)
         raise PermissionError(error_msg)
 
+
